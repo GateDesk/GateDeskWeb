@@ -18,7 +18,7 @@ set -euo pipefail
 TOKEN="${1:-}"
 SERVER_IP="${2:-127.0.0.1}"
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-CFG="$HOME/Library/Preferences/com.carriez.GateDesk/GateDesk2.toml"
+CFG="$HOME/Library/Application Support/GateDesk/config/GateDesk2.toml"
 PORT="${PORT:-3000}"
 BROWSER="${BROWSER:-open}"
 
