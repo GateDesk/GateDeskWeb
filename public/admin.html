@@ -126,7 +126,7 @@
     <script>
       const LOCAL = 'http://127.0.0.1:21120';
       const params = new URLSearchParams(location.search);
-      const TOKEN = params.get('token') || '';
+      let TOKEN = '';
       const ENDPOINT = location.origin;
 
       let role = 'operator';
@@ -453,8 +453,34 @@
         }
       }
 
+      // 从 URL 的一次性票据换会话 + 本机 API token；刷新时凭会话 cookie 取回。
+      // 成功后把 ?ticket= 从地址栏去掉，token 只保存在内存变量里。
+      async function resolveToken() {
+        const ticket = params.get('ticket');
+        try {
+          let res;
+          if (ticket) {
+            res = await fetch(ENDPOINT + '/api/auth/exchange', {
+              method: 'POST', headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ ticket }),
+            });
+          } else {
+            res = await fetch(ENDPOINT + '/api/me');
+          }
+          const data = await res.json();
+          if (!data.ok || !data.token) throw new Error(data.error || '未登录');
+          TOKEN = data.token;
+          if (ticket) history.replaceState({}, '', location.pathname);
+          return true;
+        } catch (e) {
+          TOKEN = '';
+          return false;
+        }
+      }
+
       async function init() {
-        if (!TOKEN) $('tokenWarn').hidden = false;
+        const authed = await resolveToken();
+        if (!authed) $('tokenWarn').hidden = false;
         loadSelfId();
         try { await login(); } catch (e) { /* 服务端可能尚未启动 */ }
         loadDevices();

@@ -19,7 +19,7 @@ Control itself happens in the native GateDesk client, driven through its local H
 ./start.sh
 ```
 
-It ensures an `api-token` in the GateDesk config, launches GateDesk, starts `server.js` (default `PORT=3000`), prints both URLs, and opens the operator console. Mode override: `./start.sh employee|admin|both`.
+It ensures an `api-token` in the GateDesk config, launches GateDesk, starts `server.js` (default `PORT=3000`) with `API_TOKEN` set, mints one-time launch tickets, prints both URLs, and opens the operator console. Mode override: `./start.sh employee|admin|both`.
 
 **Customer machine** — lightweight launcher:
 
@@ -27,7 +27,7 @@ It ensures an `api-token` in the GateDesk config, launches GateDesk, starts `ser
 ./start-client.sh <api-token> [server-ip]
 ```
 
-Writes the shared token into the local GateDesk config, starts GateDesk, and opens the customer page pointed at the operator machine (default `server-ip=127.0.0.1` for single-machine debugging).
+Writes the shared token into the local GateDesk config, starts GateDesk, mints its own ticket from the operator's server, and opens the customer page pointed at the operator machine (default `server-ip=127.0.0.1` for single-machine debugging).
 
 See `GateDesk_客户端集成设计方案1.2.md` for the design (roles, state machine, REST/WS contract, PoC simplifications).
 
@@ -35,4 +35,5 @@ See `GateDesk_客户端集成设计方案1.2.md` for the design (roles, state ma
 
 - `api-token` is cached at GateDesk startup — after the first token write, restart GateDesk before re-running.
 - macOS path for the GateDesk config: `~/Library/Preferences/com.carriez.GateDesk/GateDesk2.toml`.
-- PoC scope: in-memory state, no auth/rate-limit/audit yet.
+- **Auth model**: the `api-token` never appears in a URL or browser history. `start.sh` / `start-client.sh` mint a single-use, 5-minute launch ticket (`POST /api/launch`); the page exchanges it for an HttpOnly session cookie (`POST /api/auth/exchange`), then fetches the token in memory via `GET /api/me`. Refreshing keeps the session via the cookie.
+- PoC scope: `/api/launch` is unauthenticated (anyone on the LAN can open the pages — acceptable since the token only reaches each machine's loopback `127.0.0.1:21120`), roles are still front-end declared, and the REST/WS control plane is not session-gated. Production hardening (real auth on launch, TLS, per-device tokens) is future work.
