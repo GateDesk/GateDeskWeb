@@ -34,3 +34,7 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# GateDesk machine config (contains key) and Rust client build script
+GateDesk2.toml
+setup_macos.sh

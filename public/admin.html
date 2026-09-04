@@ -1,0 +1,467 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>GateDesk - 运维端后台</title>
+    <style>
+      * { box-sizing: border-box; }
+      body {
+        font-family: Arial, sans-serif;
+        background: #f3f4f6;
+        margin: 0;
+        padding: 24px;
+      }
+      .container { max-width: 900px; margin: 0 auto; }
+      .header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; }
+      .header h1 { margin: 0; }
+      .nav a { text-decoration: none; background: #111827; color: white; padding: 10px 14px; border-radius: 8px; }
+      .card { background: white; border-radius: 16px; padding: 18px; box-shadow: 0 8px 18px rgba(17,24,39,0.06); }
+      .list { display: grid; gap: 14px; margin-top: 14px; }
+      .item {
+        border: 1px solid #e5e7eb; border-radius: 12px; padding: 14px;
+        display: flex; justify-content: space-between; align-items: center; gap: 12px; flex-wrap: wrap;
+      }
+      .item .left { display: grid; gap: 4px; }
+      .id-num { font-family: monospace; font-weight: bold; color: #1d4ed8; font-size: 16px; }
+      .status-pill {
+        display: inline-block; border-radius: 999px; padding: 5px 10px; font-size: 12px; font-weight: bold;
+        background: #e0f2fe; color: #075985;
+      }
+      .status-pill.requested { background: #fef3c7; color: #92400e; }
+      .status-pill.assisting { background: #dcfce7; color: #166534; }
+      .meta { color: #4b5563; font-size: 14px; }
+      .banner { padding: 12px 14px; border-radius: 10px; font-size: 14px; margin-bottom: 16px; }
+      .banner.warn { background: #fef3c7; color: #92400e; border: 1px solid #fde68a; }
+      .banner.info { background: #eff6ff; color: #1e40af; border: 1px solid #bfdbfe; }
+      button { border: none; border-radius: 8px; padding: 10px 14px; cursor: pointer; color: white; font-weight: bold; }
+      button:disabled { background: #9ca3af; cursor: not-allowed; }
+      .enter-btn { background: #2563eb; }
+      .control-btn { background: #7c3aed; }
+      .force-btn { background: #b45309; }
+      .localoff-btn { background: #0891b2; }
+      .voice-btn { background: #0d9488; }
+      .end-btn { background: #dc2626; }
+      .back-btn { background: #6b7280; }
+      .muted { color: #6b7280; }
+      .actions { display: flex; gap: 10px; flex-wrap: wrap; }
+      .rolebar { display: flex; gap: 16px; align-items: center; margin-bottom: 12px; font-size: 14px; }
+      .rolebar label { display: inline-flex; align-items: center; gap: 4px; cursor: pointer; }
+      .chat { margin-top: 16px; border: 1px solid #e5e7eb; border-radius: 12px; overflow: hidden; }
+      .chat-head { background: #111827; color: #fff; padding: 10px 14px; font-weight: bold; }
+      .chat-msgs {
+        height: 240px; overflow-y: auto; padding: 12px; background: #f9fafb;
+        display: flex; flex-direction: column; gap: 8px;
+      }
+      .msg { max-width: 80%; padding: 8px 12px; border-radius: 12px; font-size: 14px; }
+      .msg .meta { font-size: 11px; color: #9ca3af; margin-bottom: 2px; }
+      .msg.user { align-self: flex-start; background: #e5e7eb; }
+      .msg.me { align-self: flex-end; background: #a7f3d0; }
+      .chat-input-row { display: flex; gap: 8px; padding: 10px; background: #fff; }
+      .chat-input-row input { flex: 1; font-size: 14px; padding: 10px 12px; border: 1px solid #d1d5db; border-radius: 8px; }
+      .chat-input-row button { padding: 10px 16px; font-size: 14px; background: #2563eb; }
+    </style>
+  </head>
+  <body>
+    <div class="container">
+      <div class="header">
+        <h1>GateDesk远程协助（运维端）</h1>
+      </div>
+
+      <div id="tokenWarn" class="banner warn" hidden>
+        未携带本机本地 API token（应通过本机 start.sh 打开）。远程控制 / 断开 / 语音等需要调用本机 GateDesk 的操作不可用。
+      </div>
+
+      <div id="selfId" class="banner info" hidden>
+        本机（运维端）GateDesk ID：<span class="id-num" id="selfIdText">-</span>
+      </div>
+
+      <div class="card" id="roleCard">
+        <div class="rolebar">
+          <span class="muted">身份：</span>
+          <label><input type="radio" name="role" value="operator" checked /> 普通运维</label>
+          <label><input type="radio" name="role" value="superadmin" /> 超级管理员（可强制控制）</label>
+        </div>
+      </div>
+
+      <!-- 设备列表 -->
+      <div class="card" id="listCard">
+        <h2 style="margin:0">客户设备</h2>
+        <div class="list" id="deviceList">
+          <div class="item"><span class="muted">加载中…</span></div>
+        </div>
+      </div>
+
+      <!-- 进行中的协助 -->
+      <div class="card" id="activeCard" hidden>
+        <div style="display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap">
+          <div>
+            <h2 style="margin:0">协助 - <span class="id-num" id="deviceIdText">-</span></h2>
+            <div class="meta" style="margin-top:6px">
+              状态：<span class="status-pill" id="statePill">-</span>
+            </div>
+          </div>
+          <button class="back-btn" id="backBtn">返回列表</button>
+        </div>
+        <div class="actions" style="margin-top:14px">
+          <button class="control-btn" id="controlBtn">开始协助</button>
+          <button class="force-btn" id="forceBtn" hidden>强制控制</button>
+          <button class="localoff-btn" id="localOffBtn" disabled>断开本地会话</button>
+          <button class="voice-btn" id="voiceBtn">打开语音</button>
+          <button class="end-btn" id="endBtn">结束协助</button>
+        </div>
+        <p class="muted" id="ctrlHint" style="margin:10px 0 0;font-size:13px"></p>
+
+        <div class="chat" id="chatPanel" hidden>
+          <div class="chat-head">与客户聊天</div>
+          <div class="chat-msgs" id="chatMsgs"></div>
+          <div class="chat-input-row">
+            <input id="chatInput" placeholder="输入消息，按回车发送" disabled />
+            <button id="chatSend" disabled>发送</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <script>
+      const LOCAL = 'http://127.0.0.1:21120';
+      const params = new URLSearchParams(location.search);
+      const TOKEN = params.get('token') || '';
+      const ENDPOINT = location.origin;
+
+      let role = 'operator';
+      let activeDevice = null;
+      let ws = null;
+      let voiceOn = false;
+      let nativeActive = false; // 本机已通过 /connect 发起原生会话且尚未结束
+
+      const $ = (id) => document.getElementById(id);
+
+      async function localJson(path, options) {
+        const sep = path.includes('?') ? '&' : '?';
+        const res = await fetch(LOCAL + path + sep + 'token=' + encodeURIComponent(TOKEN), options);
+        let body = null;
+        try { body = await res.json(); } catch { }
+        if (!res.ok) throw new Error((body && body.error) || ('HTTP ' + res.status));
+        return body;
+      }
+
+      function escapeHtml(s) {
+        return String(s).replace(/[&<>"']/g, (c) => (
+          { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]
+        ));
+      }
+
+      const stateMap = {
+        online: '在线',
+        requested: '已请求协助',
+        assisting: '协助中',
+      };
+
+      function pill(state) {
+        return `<span class="status-pill ${state}">${stateMap[state] || state}</span>`;
+      }
+
+      async function login() {
+        const res = await fetch(ENDPOINT + '/api/auth/login', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ role }),
+        });
+        const data = await res.json();
+        if (!data.ok) throw new Error(data.error || '登录失败');
+      }
+
+      async function loadDevices() {
+        try {
+          const res = await fetch(ENDPOINT + '/api/devices');
+          const data = await res.json();
+          renderList(data.devices || []);
+        } catch (e) {
+          $('deviceList').innerHTML = '<div class="item"><span class="muted">服务端不可达：' + escapeHtml(e.message) + '</span></div>';
+        }
+      }
+
+      function renderList(devices) {
+        if (!devices.length) {
+          $('deviceList').innerHTML = '<div class="item"><span class="muted">当前无在线客户设备。请客户先打开本机 GateDesk 并运行 start-client.sh。</span></div>';
+          return;
+        }
+        $('deviceList').innerHTML = devices.map((d) => {
+          let action = '';
+          if (d.state === 'requested') {
+            action = `<button class="control-btn" data-act="start" data-id="${escapeHtml(d.id)}">开始协助</button>`;
+          } else if (d.state === 'online' && role === 'superadmin') {
+            action = `<button class="force-btn" data-act="force" data-id="${escapeHtml(d.id)}">强制控制</button>`;
+          } else if (d.state === 'assisting') {
+            action = `<button class="end-btn" data-act="end" data-id="${escapeHtml(d.id)}">结束协助</button>`;
+          }
+          return `
+          <div class="item">
+            <div class="left">
+              <div><span class="id-num">${escapeHtml(d.id)}</span> ${pill(d.state)}</div>
+              <div class="meta">最近在线：${new Date(d.lastSeen).toLocaleString()}</div>
+            </div>
+            <div class="actions">
+              ${action}
+              <button class="enter-btn" data-act="enter" data-id="${escapeHtml(d.id)}">聊天</button>
+            </div>
+          </div>`;
+        }).join('');
+        $('deviceList').querySelectorAll('button[data-act]').forEach((b) => {
+          b.addEventListener('click', () => {
+            const id = b.dataset.id;
+            const act = b.dataset.act;
+            if (act === 'start') startControl(id);
+            else if (act === 'force') forceControl(id);
+            else if (act === 'end') endSession(id);
+            else enterDevice(id);
+          });
+        });
+      }
+
+      function appendMessage(m) {
+        const div = document.createElement('div');
+        div.className = 'msg ' + (m.role === 'user' ? 'user' : 'me');
+        const time = new Date(m.at).toLocaleTimeString();
+        div.innerHTML =
+          `<div class="meta">${escapeHtml(m.from)} · ${time}</div>` +
+          `<div>${escapeHtml(m.text)}</div>`;
+        $('chatMsgs').appendChild(div);
+        $('chatMsgs').scrollTop = $('chatMsgs').scrollHeight;
+      }
+
+      function setState(state) {
+        const s = $('statePill');
+        s.className = 'status-pill ' + state;
+        s.textContent = stateMap[state] || state;
+        if (state === 'assisting') {
+          $('ctrlHint').textContent = '请在打开的 GateDesk 原生窗口中完成远程协助；结束请点击「断开本地会话」或「结束协助」。';
+        } else if (state === 'requested') {
+          $('ctrlHint').textContent = '客户已请求协助，点击「开始协助」进入远程桌面。';
+        } else {
+          $('ctrlHint').textContent = role === 'superadmin' ? '可点击「强制控制」直接接管该客户桌面。' : '';
+        }
+        $('controlBtn').disabled = !TOKEN || state !== 'requested';
+        $('forceBtn').disabled = !TOKEN || state !== 'online';
+        $('forceBtn').hidden = role !== 'superadmin';
+        $('voiceBtn').disabled = !TOKEN;
+        $('localOffBtn').disabled = !TOKEN || state !== 'assisting';
+      }
+
+      function connectChat() {
+        const proto = location.protocol === 'https:' ? 'wss://' : 'ws://';
+        ws = new WebSocket(`${proto}${location.host}/ws?deviceId=${activeDevice.id}&role=${role}`);
+        ws.onopen = () => {
+          $('chatPanel').hidden = false;
+          $('chatInput').disabled = false;
+          $('chatSend').disabled = false;
+        };
+        ws.onmessage = (event) => {
+          const data = JSON.parse(event.data);
+          if (data.type === 'history') {
+            $('chatMsgs').innerHTML = '';
+            (data.messages || []).forEach(appendMessage);
+          } else if (data.type === 'chat') {
+            appendMessage(data.message);
+          } else if (data.type === 'session-state') {
+            setState(data.state);
+          } else if (data.type === 'control-started') {
+            setState('assisting');
+          } else if (data.type === 'control-ended' || data.type === 'peer-ended') {
+            // 会话结束（无论谁发起）：先断开本机由 /connect 发起的原生会话，再更新状态。
+            tearDownLocal();
+            nativeActive = false;
+            if (data.type === 'peer-ended' && data.by === 'user') alert('客户已结束协助。');
+            setState('online');
+          }
+        };
+        ws.onclose = () => { ws = null; };
+      }
+
+      function sendChat() {
+        const text = $('chatInput').value.trim();
+        if (!text || !ws || ws.readyState !== 1) return;
+        ws.send(JSON.stringify({ type: 'chat', from: '运维', text }));
+        $('chatInput').value = '';
+      }
+
+      function enterDevice(deviceId) {
+        if (!deviceId) return;
+        if (ws) { ws.close(); ws = null; }
+        activeDevice = { id: deviceId };
+        $('listCard').hidden = true;
+        $('activeCard').hidden = false;
+        $('deviceIdText').textContent = deviceId;
+        $('chatMsgs').innerHTML = '';
+        $('chatPanel').hidden = true;
+        $('ctrlHint').textContent = '接入中…';
+        connectChat();
+      }
+
+      function backToList() {
+        if (ws) { ws.close(); ws = null; }
+        activeDevice = null;
+        $('activeCard').hidden = true;
+        $('listCard').hidden = false;
+        loadDevices();
+      }
+
+      // 发起远程控制：请求服务端下发受控端凭据，再触发本机 GateDesk 原生连接。
+      async function startControl(deviceId) {
+        if (!deviceId || !TOKEN) return;
+        enterDevice(deviceId);
+        try {
+          const res = await fetch(ENDPOINT + '/api/request/start', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ deviceId }),
+          });
+          const data = await res.json();
+          if (!data.ok) throw new Error(data.error || '控制请求失败');
+          const q = '/connect?id=' + encodeURIComponent(data.id) +
+                    '&password=' + encodeURIComponent(data.password || '');
+          await localJson(q, { method: 'POST' });
+          nativeActive = true;
+          setState('assisting');
+        } catch (e) {
+          alert('发起远程控制失败：' + e.message);
+        }
+      }
+
+      // 超级管理员强制控制：无需客户点「请求协助」。
+      async function forceControl(deviceId) {
+        if (!deviceId || !TOKEN) return;
+        enterDevice(deviceId);
+        try {
+          const res = await fetch(ENDPOINT + '/api/device/force-control', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ deviceId, role }),
+          });
+          const data = await res.json();
+          if (!data.ok) throw new Error(data.error || '强制控制失败');
+          const q = '/connect?id=' + encodeURIComponent(data.id) +
+                    '&password=' + encodeURIComponent(data.password || '');
+          await localJson(q, { method: 'POST' });
+          nativeActive = true;
+          setState('assisting');
+        } catch (e) {
+          alert('强制控制失败：' + e.message);
+        }
+      }
+
+      async function disconnectLocal() {
+        if (!activeDevice || !TOKEN) return;
+        nativeActive = false;
+        try {
+          await localJson('/disconnect', { method: 'POST' }).catch(() => {});
+          await notifyServerEnd(activeDevice.id);
+          setState('online');
+          loadDevices();
+          alert('已断开本机发起的远程会话，并已通知客户。');
+        } catch (e) {
+          alert('断开失败：' + e.message);
+        }
+      }
+
+      // 会话结束时的兜底：静默断开本机原生会话，避免对端结束后本地残留。
+      function tearDownLocal() {
+        if (!TOKEN) return;
+        localJson('/disconnect', { method: 'POST' }).catch(() => {});
+      }
+
+      // 通知服务端结束该设备协助（对端会收到 peer-ended）。吞掉网络错误。
+      async function notifyServerEnd(deviceId) {
+        if (!deviceId) return;
+        try {
+          await fetch(ENDPOINT + '/api/request/end', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ deviceId, by: 'operator' }),
+          });
+        } catch (e) { /* 服务端不可达时保留本地状态，稍后可手动结束 */ }
+      }
+
+      // 周期性探测本机原生会话：若 /connect 发起的原生进程已退出（如控制窗口被直接关闭、
+      // 连接意外断开）而服务端仍认为 assisting，则代服务端收尾——通知结束并刷新状态。
+      async function watchNativeSession() {
+        if (!nativeActive || !activeDevice || !TOKEN) return;
+        let st;
+        try { st = await localJson('/status'); } catch { return; }
+        if (st.in_session) return;
+        nativeActive = false;
+        await notifyServerEnd(activeDevice.id);
+        setState('online');
+        loadDevices();
+      }
+
+      async function toggleVoice() {
+        try {
+          await localJson('/voice', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ enabled: !voiceOn }),
+          });
+          voiceOn = !voiceOn;
+          $('voiceBtn').textContent = voiceOn ? '关闭语音' : '打开语音';
+        } catch (e) {
+          alert('语音切换失败：' + e.message);
+        }
+      }
+
+      async function endSession(deviceId) {
+        const id = deviceId || (activeDevice && activeDevice.id);
+        if (!id) return;
+        nativeActive = false;
+        try {
+          if (TOKEN) {
+            await localJson('/disconnect', { method: 'POST' }).catch(() => {});
+          }
+          const res = await fetch(ENDPOINT + '/api/request/end', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ deviceId: id, by: 'operator' }),
+          });
+          const data = await res.json();
+          if (!data.ok) throw new Error(data.error || '结束失败');
+          setState('online');
+          loadDevices();
+        } catch (e) {
+          alert('结束协助失败：' + e.message);
+        }
+      }
+
+      $('backBtn').addEventListener('click', backToList);
+      $('controlBtn').addEventListener('click', () => startControl(activeDevice.id));
+      $('forceBtn').addEventListener('click', () => forceControl(activeDevice.id));
+      $('localOffBtn').addEventListener('click', disconnectLocal);
+      $('voiceBtn').addEventListener('click', toggleVoice);
+      $('endBtn').addEventListener('click', () => endSession());
+      $('chatSend').addEventListener('click', sendChat);
+      $('chatInput').addEventListener('keydown', (e) => { if (e.key === 'Enter') sendChat(); });
+      document.querySelectorAll('input[name=role]').forEach((r) => {
+        r.addEventListener('change', async () => {
+          role = r.value;
+          try { await login(); } catch (e) { /* 服务端未启动时列表会显示不可达 */ }
+          loadDevices();
+        });
+      });
+
+      async function loadSelfId() {
+        if (!TOKEN) return;
+        try {
+          const data = await localJson('/id');
+          $('selfIdText').textContent = data.id;
+          $('selfId').hidden = false;
+        } catch (e) {
+          $('selfId').hidden = true;
+        }
+      }
+
+      async function init() {
+        if (!TOKEN) $('tokenWarn').hidden = false;
+        loadSelfId();
+        try { await login(); } catch (e) { /* 服务端可能尚未启动 */ }
+        loadDevices();
+        setInterval(() => { if (!activeDevice) loadDevices(); }, 3000);
+        setInterval(watchNativeSession, 2000);
+      }
+      init();
+    </script>
+  </body>
+</html>

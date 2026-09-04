@@ -1,0 +1,311 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>GateDesk - 客户远程协助</title>
+    <style>
+      * { box-sizing: border-box; }
+      body {
+        font-family: Arial, sans-serif;
+        background: #f4f7fb;
+        margin: 0;
+        padding: 24px;
+      }
+      .container {
+        max-width: 720px;
+        margin: 0 auto;
+        background: white;
+        border-radius: 16px;
+        padding: 24px;
+        box-shadow: 0 8px 24px rgba(15, 23, 42, 0.08);
+      }
+      h1 { margin-top: 0; color: #1f2937; }
+      .banner {
+        padding: 12px 14px; border-radius: 10px; font-size: 14px; margin-bottom: 16px;
+      }
+      .banner.warn { background: #fef3c7; color: #92400e; border: 1px solid #fde68a; }
+      .banner.info { background: #eff6ff; color: #1e40af; border: 1px solid #bfdbfe; }
+      .card {
+        background: #f9fafb; border: 1px solid #e5e7eb; border-radius: 12px; padding: 16px;
+        margin-bottom: 16px; display: grid; gap: 8px;
+      }
+      .card h3 { margin: 0; color: #374151; }
+      .kv { font-size: 14px; color: #4b5563; }
+      .id-num { font-family: monospace; font-weight: bold; color: #1d4ed8; font-size: 18px; }
+      .status-pill {
+        display: inline-block; border-radius: 999px; padding: 6px 12px; font-size: 13px; font-weight: bold;
+        background: #e0f2fe; color: #075985;
+      }
+      .status-pill.requested { background: #fef3c7; color: #92400e; }
+      .status-pill.assisting { background: #dcfce7; color: #166534; }
+      .row { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
+      button {
+        border: none; border-radius: 8px; padding: 10px 16px; cursor: pointer; color: white; font-weight: bold;
+      }
+      button:disabled { background: #9ca3af; cursor: not-allowed; }
+      .btn-request { background: #2563eb; }
+      .btn-voice { background: #0891b2; }
+      .btn-end { background: #dc2626; }
+      .btn-retry { background: #6b7280; }
+      .chat {
+        border: 1px solid #e5e7eb; border-radius: 12px; overflow: hidden; margin-top: 4px;
+      }
+      .chat-head { background: #111827; color: #fff; padding: 10px 14px; font-weight: bold; }
+      .chat-msgs {
+        height: 220px; overflow-y: auto; padding: 12px; background: #f9fafb;
+        display: flex; flex-direction: column; gap: 8px;
+      }
+      .msg { max-width: 80%; padding: 8px 12px; border-radius: 12px; font-size: 14px; }
+      .msg .meta { font-size: 11px; color: #9ca3af; margin-bottom: 2px; }
+      .msg.operator { align-self: flex-start; background: #e5e7eb; }
+      .msg.me { align-self: flex-end; background: #bfdbfe; }
+      .chat-input-row { display: flex; gap: 8px; padding: 10px; background: #fff; }
+      .chat-input-row input { flex: 1; font-size: 14px; padding: 10px 12px; border: 1px solid #d1d5db; border-radius: 8px; }
+      .chat-input-row button { padding: 10px 16px; font-size: 14px; background: #2563eb; }
+    </style>
+  </head>
+  <body>
+    <div class="container">
+      <h1>GateDesk 远程协助（客户端）</h1>
+
+      <div id="tokenWarn" class="banner warn" hidden>
+        未携带本地 API token（应通过 start-client.sh 打开本页）。本机 GateDesk ID 与协助功能不可用。
+      </div>
+      <div id="permHint" class="banner info" hidden>
+        首次远程协助请在系统设置中给 GateDesk 授予 <b>屏幕录制</b> 与 <b>麦克风</b> 权限，否则运维人员无法看到您的画面。
+      </div>
+
+      <div id="setup" class="card">
+        <h3>本机设备</h3>
+        <div class="kv" id="deviceLine">正在读取本机 GateDesk ID…</div>
+        <div class="kv" id="deviceErr" hidden style="color:#dc2626"></div>
+        <div class="row" style="margin-top:8px">
+          <button class="btn-retry" id="retryBtn" hidden>重试</button>
+        </div>
+      </div>
+
+      <div id="sessionCard" class="card" hidden>
+        <h3>协助</h3>
+        <div class="kv">
+          状态：<span class="status-pill" id="statePill">在线</span>
+        </div>
+        <div class="kv" id="pairHint">尚未请求协助。需要帮助时点击「请求协助」。</div>
+        <div class="row" style="margin-top:8px">
+          <button class="btn-request" id="requestBtn">请求协助</button>
+          <button class="btn-voice" id="voiceBtn">打开语音</button>
+          <button class="btn-end" id="endBtn" disabled>结束协助</button>
+        </div>
+      </div>
+
+      <div class="chat" id="chatPanel" hidden>
+        <div class="chat-head">与运维人员聊天</div>
+        <div class="chat-msgs" id="chatMsgs"></div>
+        <div class="chat-input-row">
+          <input id="chatInput" placeholder="输入消息，按回车发送" disabled />
+          <button id="chatSend" disabled>发送</button>
+        </div>
+      </div>
+    </div>
+
+    <script>
+      const LOCAL = 'http://127.0.0.1:21120';
+      const params = new URLSearchParams(location.search);
+      const TOKEN = params.get('token') || '';
+      const ENDPOINT = location.origin;
+
+      let deviceId = null;
+      let currentPassword = '';
+      let ws = null;
+      let voiceOn = false;
+
+      const $ = (id) => document.getElementById(id);
+
+      async function localJson(path, options) {
+        const sep = path.includes('?') ? '&' : '?';
+        const res = await fetch(LOCAL + path + sep + 'token=' + encodeURIComponent(TOKEN), options);
+        let body = null;
+        try { body = await res.json(); } catch { }
+        if (!res.ok) throw new Error((body && body.error) || ('HTTP ' + res.status));
+        return body;
+      }
+
+      function randPassword(len) {
+        const chars = 'abcdefghjkmnpqrstuvwxyzABCDEFGHJKMNPQRSTUVWXYZ23456789';
+        let out = '';
+        for (let i = 0; i < len; i++) out += chars[Math.floor(Math.random() * chars.length)];
+        return out;
+      }
+
+      function escapeHtml(s) {
+        return String(s).replace(/[&<>"']/g, (c) => (
+          { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]
+        ));
+      }
+
+      function appendMessage(m) {
+        const div = document.createElement('div');
+        div.className = 'msg ' + (m.role === 'operator' ? 'operator' : 'me');
+        const time = new Date(m.at).toLocaleTimeString();
+        div.innerHTML =
+          `<div class="meta">${escapeHtml(m.from)} · ${time}</div>` +
+          `<div>${escapeHtml(m.text)}</div>`;
+        $('chatMsgs').appendChild(div);
+        $('chatMsgs').scrollTop = $('chatMsgs').scrollHeight;
+      }
+
+      function renderState(state) {
+        const map = {
+          online: '在线',
+          requested: '已请求协助',
+          assisting: '协助中',
+        };
+        const pill = $('statePill');
+        pill.textContent = map[state] || state;
+        pill.className = 'status-pill ' + state;
+        if (state === 'requested') {
+          $('pairHint').textContent = '已请求协助，等待运维人员接入…';
+        } else if (state === 'assisting') {
+          $('pairHint').textContent = '运维人员正在远程协助，请保持 GateDesk 开启。';
+          $('permHint').hidden = false;
+        } else {
+          $('pairHint').textContent = '尚未请求协助。需要帮助时点击「请求协助」。';
+        }
+        $('requestBtn').disabled = state !== 'online';
+        $('endBtn').disabled = state === 'online';
+      }
+
+      function connectChat() {
+        const proto = location.protocol === 'https:' ? 'wss://' : 'ws://';
+        ws = new WebSocket(`${proto}${location.host}/ws?deviceId=${deviceId}&role=user`);
+        ws.onopen = () => {
+          $('chatPanel').hidden = false;
+          $('chatInput').disabled = false;
+          $('chatSend').disabled = false;
+        };
+        ws.onmessage = (event) => {
+          const data = JSON.parse(event.data);
+          if (data.type === 'history') {
+            $('chatMsgs').innerHTML = '';
+            (data.messages || []).forEach(appendMessage);
+          } else if (data.type === 'chat') {
+            appendMessage(data.message);
+          } else if (data.type === 'session-state') {
+            renderState(data.state);
+          } else if (data.type === 'control-started') {
+            renderState('assisting');
+          } else if (data.type === 'control-ended' || data.type === 'peer-ended') {
+            if (data.type === 'peer-ended') alert('对方已结束协助。');
+            renderState('online');
+          }
+        };
+        ws.onclose = () => { ws = null; };
+      }
+
+      function sendChat() {
+        const text = $('chatInput').value.trim();
+        if (!text || !ws || ws.readyState !== 1) return;
+        ws.send(JSON.stringify({ type: 'chat', from: '客户', text }));
+        $('chatInput').value = '';
+      }
+
+      async function toggleVoice() {
+        try {
+          await localJson('/voice', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ enabled: !voiceOn }),
+          });
+          voiceOn = !voiceOn;
+          $('voiceBtn').textContent = voiceOn ? '关闭语音' : '打开语音';
+        } catch (e) {
+          alert('语音切换失败：' + e.message);
+        }
+      }
+
+      // 读本机 ID 并自动上线（上报给运维端），无需手填。
+      async function goOnline() {
+        if (!TOKEN) throw new Error('缺少本地 API token');
+        const data = await localJson('/id');
+        deviceId = data.id;
+        $('deviceLine').innerHTML =
+          '本机 GateDesk ID：<span class="id-num">' + escapeHtml(deviceId) + '</span>';
+        // 1) 轮换一个随机连接密码
+        currentPassword = randPassword(8);
+        await localJson('/password', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ password: currentPassword }),
+        });
+        // 2) 上报本机 ID 与密码（服务端由此获得本机 ID）
+        const res = await fetch(ENDPOINT + '/api/device/register', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ id: deviceId, password: currentPassword }),
+        });
+        const reg = await res.json();
+        if (!reg.ok) throw new Error(reg.error || '上线失败');
+        $('sessionCard').hidden = false;
+        renderState(reg.device.state);
+        connectChat();
+      }
+
+      async function requestHelp() {
+        try {
+          const res = await fetch(ENDPOINT + '/api/request/create', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ deviceId }),
+          });
+          const data = await res.json();
+          if (!data.ok) throw new Error(data.error || '请求失败');
+          renderState(data.device.state);
+        } catch (e) {
+          alert('请求协助失败：' + e.message);
+        }
+      }
+
+      async function endHelp() {
+        try {
+          await fetch(ENDPOINT + '/api/request/end', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ deviceId, by: 'user' }),
+          });
+          // 轮换密码，使已下发的旧凭据失效
+          if (TOKEN) {
+            currentPassword = randPassword(8);
+            await localJson('/password', {
+              method: 'POST', headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ password: currentPassword }),
+            });
+            await fetch(ENDPOINT + '/api/device/register', {
+              method: 'POST', headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ id: deviceId, password: currentPassword }),
+            });
+          }
+        } catch (e) {
+          console.warn('end assist error', e);
+        }
+      }
+
+      async function init() {
+        if (!TOKEN) $('tokenWarn').hidden = false;
+        try {
+          await goOnline();
+        } catch (e) {
+          $('deviceLine').textContent = '无法读取本机 GateDesk ID';
+          $('deviceErr').hidden = false;
+          $('deviceErr').textContent = e.message;
+          $('retryBtn').hidden = false;
+        }
+      }
+
+      $('retryBtn').addEventListener('click', init);
+      $('requestBtn').addEventListener('click', requestHelp);
+      $('voiceBtn').addEventListener('click', toggleVoice);
+      $('endBtn').addEventListener('click', endHelp);
+      $('chatSend').addEventListener('click', sendChat);
+      $('chatInput').addEventListener('keydown', (e) => { if (e.key === 'Enter') sendChat(); });
+
+      init();
+    </script>
+  </body>
+</html>
