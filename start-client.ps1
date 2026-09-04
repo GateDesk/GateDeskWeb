@@ -1,0 +1,142 @@
+<#
+.SYNOPSIS
+  GateDesk 客户端（用户端/受控端）启动脚本（Windows）
+
+.DESCRIPTION
+  在【用户机】上运行：
+    1. 把运维端给的 api-token 写入本机 GateDesk 配置（GateDesk2.toml [options]）
+    2. 启动本机 GateDesk 客户端（自动查找 gatedesk.exe）
+    3. 打开用户页 http://<运维机ip>:<port>/employee?token=...（服务端由此获得本机 GateDesk ID）
+
+  用法：
+    .\start-client.ps1 <api-token> [server] [-Port <port>]
+      api-token : 运维端 start.sh / start-server.ps1 生成并打印的 token（两机共享同一值）
+      server    : 运维端 Web 服务地址，支持 4 种写法（默认 127.0.0.1，单机调试时用）：
+                    - ip            如 192.168.1.10        -> http://192.168.1.10:3000
+                    - ip:port       如 192.168.1.10:8080     -> http://192.168.1.10:8080
+                    - http(s)://host 如 http://ops.example.com -> http://ops.example.com:3000
+                    - 完整 URL      如 https://ops.example.com:8443 -> 原样使用
+
+  注意：api-token 由 GateDesk 启动时缓存，若 GateDesk 已在运行而本次写入/变更了 token，
+        需先退出 GateDesk 再重跑，否则本地 API 返回 401。
+#>
+param(
+    [Parameter(Mandatory = $false, Position = 0)]
+    [string]$Token = "",
+    [Parameter(Mandatory = $false, Position = 1)]
+    [string]$Server = "127.0.0.1",
+    [int]$Port = 3000
+)
+
+$ErrorActionPreference = "Stop"
+
+function Write-Token {
+    <# 把 token 写入 GateDesk2.toml 的 [options]（绝不新增重复表头） #>
+    $cfgDir = Join-Path $env:APPDATA "GateDesk\config"
+    $cfg = Join-Path $cfgDir "GateDesk2.toml"
+    New-Item -ItemType Directory -Force -Path $cfgDir | Out-Null
+
+    $lines = if (Test-Path $cfg) { @(Get-Content $cfg) } else { @() }
+    $tokenLine = "api-token = '$Token'"
+
+    # 1) 已有 api-token 行 -> 原地替换
+    for ($i = 0; $i -lt $lines.Count; $i++) {
+        if ($lines[$i] -match '^\s*api-token\s*=') {
+            $lines[$i] = $tokenLine
+            Set-Content -Path $cfg -Value $lines
+            Write-Host "已写入 api-token：$cfg"
+            return
+        }
+    }
+
+    # 2) 有 [options] 段但无 api-token -> 插入段内
+    for ($i = 0; $i -lt $lines.Count; $i++) {
+        if ($lines[$i] -match '^\[options\]') {
+            # 找到下一个表头（若存在）的插入点；否则追加到文件尾
+            $insertAt = $lines.Count
+            for ($j = $i + 1; $j -lt $lines.Count; $j++) {
+                if ($lines[$j] -match '^\s*\[') { $insertAt = $j; break }
+            }
+            $newLines = New-Object System.Collections.Generic.List[string]
+            for ($k = 0; $k -lt $lines.Count; $k++) {
+                if ($k -eq $insertAt) { $newLines.Add($tokenLine) }
+                $newLines.Add($lines[$k])
+            }
+            if ($insertAt -eq $lines.Count) { $newLines.Add($tokenLine) }
+            Set-Content -Path $cfg -Value $newLines
+            Write-Host "已写入 api-token：$cfg"
+            return
+        }
+    }
+
+    # 3) 无 [options] 段 -> 追加新表
+    Add-Content -Path $cfg -Value "`n[options]`n$tokenLine"
+    Write-Host "已写入 api-token：$cfg"
+}
+
+function Find-GateDeskExe {
+    # $PSScriptRoot 在函数内仍指向本脚本所在目录（不能用 $MyInvocation.MyCommand.Path，它只在脚本顶层有效）
+    $scriptDir = $PSScriptRoot
+    # Windows 文件系统不区分大小写，候选目录名两种都覆盖不到也无妨（Test-Path 即判断）
+    $candidates = @(
+        (Join-Path $scriptDir "gatedesk.exe"),
+        (Join-Path $scriptDir "GateDesk.exe"),
+        (Join-Path $scriptDir "gatedesk\target\release\gatedesk.exe"),
+        (Join-Path $scriptDir "gatedesk\target\debug\gatedesk.exe"),
+        (Join-Path $scriptDir "GateDesk\target\release\gatedesk.exe"),
+        (Join-Path $scriptDir "GateDesk\target\debug\gatedesk.exe"),
+        "$env:ProgramFiles\GateDesk\gatedesk.exe",
+        "$env:LOCALAPPDATA\Programs\GateDesk\gatedesk.exe"
+    )
+    foreach ($c in $candidates) {
+        if (Test-Path $c) { return $c }
+    }
+    return ""
+}
+
+function Build-UserPageUrl {
+    param([string]$Server, [int]$Port, [string]$Token)
+    # 去掉两端空白与末尾 /，兼容 user 输入 http://host/ 之类
+    $s = $Server.Trim().TrimEnd('/')
+    $hasScheme = $s -match '^https?://'
+    $hasPort = $s -match ':\d+$'
+    if ($hasScheme) {
+        if ($hasPort) { return "${s}/employee?token=${Token}" }
+        return "${s}:${Port}/employee?token=${Token}"
+    }
+    if ($hasPort) { return "http://${s}/employee?token=${Token}" }
+    return "http://${s}:${Port}/employee?token=${Token}"
+}
+
+# ---- 0. 参数校验 ------------------------------------------------------------
+if ([string]::IsNullOrWhiteSpace($Token)) {
+    Write-Host "用法: .\start-client.ps1 <api-token> [server] [-Port <port>]" -ForegroundColor Yellow
+    Write-Host "  api-token : 运维端生成并打印的 token" -ForegroundColor Yellow
+    Write-Host "  server    : 运维端 Web 服务地址（可含端口/协议），默认 127.0.0.1" -ForegroundColor Yellow
+    exit 1
+}
+
+# ---- 1. 写入 api-token -------------------------------------------------------
+Write-Token
+
+# ---- 2. 启动客户端 GateDesk --------------------------------------------------
+$exe = Find-GateDeskExe
+if ([string]::IsNullOrEmpty($exe)) {
+    Write-Host "未找到 gatedesk.exe（放到脚本同级目录，或先构建 target\release\gatedesk.exe）" -ForegroundColor Yellow
+} else {
+    $running = Get-Process gatedesk -ErrorAction SilentlyContinue
+    if ($running) {
+        Write-Host "GateDesk 已在运行，跳过启动。"
+    } else {
+        Write-Host "启动 GateDesk：$exe"
+        $exeDir = Split-Path -Parent $exe
+        Start-Process -FilePath $exe -WorkingDirectory $exeDir
+    }
+}
+
+# ---- 3. 打开用户页（服务端由此获得本机 GateDesk ID）---------------------------
+$url = Build-UserPageUrl -Server $Server -Port $Port -Token $Token
+Write-Host "打开用户页：$url"
+Start-Process $url
+
+
