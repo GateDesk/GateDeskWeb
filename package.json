@@ -4,10 +4,12 @@
   "description": "Web console for GateDesk remote assistance — customer/operator pages, device-centric state machine, chat & control signaling, plus start.sh / start-client.sh launchers",
   "main": "server.js",
   "scripts": {
-    "start": "node server.js"
+    "start": "node server.js",
+    "audit:selftest": "node test-audit.js"
   },
   "dependencies": {
     "express": "^4.19.2",
     "ws": "^8.21.3"
   }
 }
+

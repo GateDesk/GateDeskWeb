@@ -48,7 +48,7 @@ done
 # ---- 1. api-token ---------------------------------------------------------
 mkdir -p "$(dirname "$CFG")"
 NEW_TOKEN=0
-token="$(sed -n "s/^api-token *= *'\([^']*\)'.*/\1/p" "$CFG" 2>/dev/null | head -1 || true)"
+token="$(sed -n "s/^api-token *= *'\\([^']*\\)'.*/\\1/p" "$CFG" 2>/dev/null | head -1 || true)"
 if [ -z "$token" ]; then
   NEW_TOKEN=1
   token="$(openssl rand -hex 16)"
@@ -63,11 +63,49 @@ if [ -z "$token" ]; then
       END { if (inopts && !done) print "api-token = \x27" t "\x27" }
     ' "$CFG" > "$tmp" && mv "$tmp" "$CFG"
   else
-    printf '\n[options]\napi-token = '"'%s'"'\n' "$token" >> "$CFG"
+    printf '\n[options]\napi-token = '"'"'%s'"'"'\n' "$token" >> "$CFG"
   fi
   echo "已生成 api-token 并写入：$CFG"
   echo "若 GateDesk 已在运行，请先退出并重新启动一次，token 才会生效；否则本地 API 返回 401。"
 fi
+
+# 审计上报地址：本机桌面端操作级事件转发到本机 server.js /api/audit（企业审计 PoC）。
+AUDIT_URL="http://localhost:${PORT}/api/audit"
+if [ -z "$(sed -n "s/^audit-server-url *= *'\\([^']*\\)'.*/\\1/p" "$CFG" 2>/dev/null | head -1 || true)" ]; then
+  tmp="$(mktemp)"
+  if grep -q '^\[options\]' "$CFG"; then
+    awk -v u="$AUDIT_URL" '
+      /^\[options\]/ { print; inopts=1; next }
+      /^\[/ && inopts && !done { print "audit-server-url = \x27" u "\x27"; done=1; inopts=0 }
+      { print }
+      END { if (inopts && !done) print "audit-server-url = \x27" u "\x27" }
+    ' "$CFG" > "$tmp" && mv "$tmp" "$CFG"
+  else
+    printf '\n[options]\naudit-server-url = '"'"'%s'"'"'\n' "$AUDIT_URL" >> "$CFG"
+  fi
+  echo "已写入 audit-server-url（审计转发地址）：$AUDIT_URL"
+fi
+
+# CORS 放行来源：GateDeskWeb 页面从 http://<HOST_IP>:PORT 加载并调用本机 21120，
+# 与本地 API 的收紧策略（§4.3）配套，把该来源写入 [options] api-cors-origin。
+CORS_URL="http://${HOST_IP}:${PORT}"
+if [ -z "$(sed -n "s/^api-cors-origin *= *'\([^']*\)'.*/\1/p" "$CFG" 2>/dev/null | head -1 || true)" ]; then
+  if grep -q '^\[options\]' "$CFG"; then
+    tmp="$(mktemp)"
+    awk -v u="$CORS_URL" '
+      /^\[options\]/ { print; inopts=1; next }
+      /^\[/ && inopts && !done { print "api-cors-origin = \x27" u "\x27"; done=1; inopts=0 }
+      { print }
+      END { if (inopts && !done) print "api-cors-origin = \x27" u "\x27" }
+    ' "$CFG" > "$tmp" && mv "$tmp" "$CFG"
+  else
+    printf '\n[options]\napi-cors-origin = '"'"'%s'"'"'\n' "$CORS_URL" >> "$CFG"
+  fi
+  echo "已写入 api-cors-origin（CORS 放行）：$CORS_URL"
+fi
+
+# 配置文件含 api-token / audit-server-url / api-cors-origin 等敏感项：收紧为仅属主可读写（类 Unix）。
+chmod 0600 "$CFG"
 
 # ---- 2. GateDesk 客户端 ----------------------------------------------------
 if [ -n "$APP" ]; then
@@ -115,3 +153,6 @@ echo "  a) 在用户机运行 start-client.sh <token> <运维机IP>（推荐，�
 echo "  b) 直接打开（5 分钟内有效，一次性）：http://${HOST_IP}:${PORT}/employee?ticket=${ticket_emp}"
 echo "运维端后台："
 echo "  http://${HOST_IP}:${PORT}/admin?ticket=${ticket_admin}"
+
+
+

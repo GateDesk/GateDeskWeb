@@ -109,6 +109,49 @@ function toPublic(device) {
 }
 
 // ---------------------------------------------------------------------------
+// 审计（PoC /api/audit 接收端）
+//   桌面端操作级事件经 [options] audit-server-url 转发到本端点；服务端自身也会
+//   记录会话编排动作（assist.start / assist.end / ...）作为补充。内存态 + 封顶，
+//   仅用于验证桌面端审计链路，不构成产品交付。
+// ---------------------------------------------------------------------------
+const auditLog = []; // {action, actor, device_id, session_id, ts, result, extra, receivedAt}
+const AUDIT_LOG_CAP = 5000;
+
+function audit(ev) {
+  const rec = {
+    action: String((ev && ev.action) || 'unknown').slice(0, 64),
+    actor: String((ev && ev.actor) || '').slice(0, 64),
+    device_id: String((ev && ev.device_id) || '').slice(0, 128),
+    session_id: Number(ev && ev.session_id) || 0,
+    ts: Number(ev && ev.ts) || Date.now(),
+    result: String((ev && ev.result) || '').slice(0, 64),
+    extra: (ev && ev.extra) || {},
+    receivedAt: Date.now(),
+  };
+  auditLog.push(rec);
+  if (auditLog.length > AUDIT_LOG_CAP) auditLog.splice(0, auditLog.length - AUDIT_LOG_CAP);
+  console.log(`[audit] ${rec.action} actor=${rec.actor} device=${rec.device_id} session=${rec.session_id} result=${rec.result}`);
+}
+
+function parseAuditBody(body) {
+  let list;
+  if (Array.isArray(body)) list = body;
+  else if (body && typeof body === 'object') list = [body];
+  // 兼容桌面端逐行 JSON 上报（body 可能是 JSON Lines 字符串）。
+  else if (typeof body === 'string' && body.trim()) {
+    list = [];
+    for (const line of body.split(/\n+/)) {
+      const l = line.trim();
+      if (!l) continue;
+      try { list.push(JSON.parse(l)); } catch { /* 跳过坏行 */ }
+    }
+  } else list = [];
+  // 丢弃没有 action 的条目（例如 express.json 把空载荷解析成 {}），否则空请求会
+  // 变成一条 action=unknown 的伪事件，污染审计流水。
+  return list.filter((ev) => ev && typeof ev === 'object' && String(ev.action || '').trim());
+}
+
+// ---------------------------------------------------------------------------
 // REST
 // ---------------------------------------------------------------------------
 
@@ -168,13 +211,14 @@ app.post('/api/device/register', (req, res) => {
   }
   let device = devices.get(String(id));
   if (!device) {
-    device = { id: String(id), password: '', state: 'online', lastSeen: Date.now(), messages: [] };
+    device = { id: String(id), password: '', state: 'online', lastSeen: Date.now(), messages: [], sessionId: null };
     devices.set(device.id, device);
   }
   device.password = String(password || '');
   device.lastSeen = Date.now();
   if (device.state === 'ended') device.state = 'online';
   broadcastState(device);
+  audit({ action: 'device.register', actor: 'device', device_id: device.id, result: 'ok' });
   res.json({ ok: true, device: toPublic(device) });
 });
 
@@ -194,6 +238,7 @@ app.post('/api/request/create', (req, res) => {
   if (device.state === 'assisting') return res.status(409).json({ ok: false, error: '协助已在进行中' });
   device.state = 'requested';
   broadcastState(device);
+  audit({ action: 'auth.request', actor: 'customer', device_id: device.id, result: 'ok' });
   res.json({ ok: true, device: toPublic(device) });
 });
 
@@ -203,9 +248,11 @@ app.post('/api/request/start', (req, res) => {
   if (!device) return res.status(404).json({ ok: false, error: '设备不存在或已下线' });
   if (device.state !== 'requested') return res.status(409).json({ ok: false, error: '设备尚未请求协助或已在进行中' });
   device.state = 'assisting';
+  device.sessionId = crypto.randomUUID();
   broadcast(device.id, { type: 'control-started', deviceId: device.id });
   broadcastState(device);
-  res.json({ ok: true, id: device.id, password: device.password || '' });
+  audit({ action: 'connect.start', actor: 'operator', device_id: device.id, session_id: device.sessionId, result: 'ok', extra: { via: 'request/start' } });
+  res.json({ ok: true, id: device.id, password: device.password || '', sessionId: device.sessionId });
 });
 
 // 超管「强制控制」：任意 online 设备 → assisting（无需用户点「请求协助」）。
@@ -216,9 +263,11 @@ app.post('/api/device/force-control', (req, res) => {
   if (!device) return res.status(404).json({ ok: false, error: '设备不存在或已下线' });
   if (device.state === 'assisting') return res.status(409).json({ ok: false, error: '协助已在进行中' });
   device.state = 'assisting';
+  device.sessionId = crypto.randomUUID();
   broadcast(device.id, { type: 'control-started', deviceId: device.id });
   broadcastState(device);
-  res.json({ ok: true, id: device.id, password: device.password || '' });
+  audit({ action: 'connect.start', actor: 'superadmin', device_id: device.id, session_id: device.sessionId, result: 'ok', extra: { via: 'force-control' } });
+  res.json({ ok: true, id: device.id, password: device.password || '', sessionId: device.sessionId });
 });
 
 // 任一端结束：assisting/requested → online，通知对端。
@@ -227,16 +276,46 @@ app.post('/api/request/end', (req, res) => {
   const device = getDevice(deviceId);
   if (!device) return res.status(404).json({ ok: false, error: '设备不存在或已下线' });
   if (device.state === 'online') return res.json({ ok: true, device: toPublic(device) });
+  const sid = device.sessionId || 0;
   device.state = 'online';
+  device.sessionId = null;
   broadcast(device.id, { type: 'peer-ended', deviceId: device.id, by: by || 'operator' });
   broadcast(device.id, { type: 'control-ended', deviceId: device.id });
   broadcastState(device);
+  audit({ action: 'connect.close', actor: by || 'operator', device_id: device.id, session_id: sid, result: 'ok' });
   res.json({ ok: true, device: toPublic(device) });
+});
+
+// 审计查询（辅助验证用）：可选 ?action=&deviceId=&limit= 过滤。
+app.get('/api/audit', (req, res) => {
+  const action = String(req.query.action || '');
+  const deviceId = String(req.query.deviceId || '');
+  const limit = Math.min(Math.max(parseInt(String(req.query.limit || '200'), 10) || 200, 1), 5000);
+  let list = auditLog;
+  if (action) list = list.filter((e) => e.action === action);
+  if (deviceId) list = list.filter((e) => e.device_id === deviceId);
+  res.json({ ok: true, total: list.length, events: list.slice(-limit) });
+});
+
+// 桌面端 / 页面上报审计事件（单条对象 / 数组 / JSON Lines 均可）。
+app.post('/api/audit', (req, res) => {
+  const events = parseAuditBody(req.body);
+  if (events.length === 0) return res.status(400).json({ ok: false, error: '空或无法解析的审计载荷' });
+  for (const ev of events) audit(ev);
+  res.json({ ok: true, count: events.length });
+});
+
+// 清空审计缓冲（闭环自测 / 演示用）。
+app.post('/api/audit/clear', (req, res) => {
+  const cleared = auditLog.length;
+  auditLog.length = 0;
+  res.json({ ok: true, cleared });
 });
 
 app.get('/', (req, res) => res.sendFile(path.join(__dirname, 'public', 'employee.html')));
 app.get('/employee', (req, res) => res.sendFile(path.join(__dirname, 'public', 'employee.html')));
 app.get('/admin', (req, res) => res.sendFile(path.join(__dirname, 'public', 'admin.html')));
+app.get('/audit', (req, res) => res.sendFile(path.join(__dirname, 'public', 'audit.html')));
 
 // ---------------------------------------------------------------------------
 // WebSocket：/ws?deviceId=...&role=user|operator|superadmin
@@ -289,4 +368,7 @@ server.listen(PORT, () => {
   console.log(`GateDesk running at http://localhost:${PORT}`);
   console.log(`User page:      http://localhost:${PORT}/employee`);
   console.log(`Operator page:  http://localhost:${PORT}/admin`);
+  console.log(`Audit console:  http://localhost:${PORT}/audit`);
 });
+
+

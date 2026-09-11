@@ -49,6 +49,46 @@ else
 fi
 echo "已写入 api-token：$CFG"
 
+# 审计上报地址：本机（受控端）桌面端操作级事件转发到运维机审计服务端 /api/audit（企业审计 PoC）。
+# 与 api-token 同理，GateDesk 启动时读取，写入后若已运行需重启一次生效。
+AUDIT_URL="http://${SERVER_IP}:${PORT}/api/audit"
+if grep -q '^[[:space:]]*audit-server-url[[:space:]]*=' "$CFG" 2>/dev/null; then
+  tmp="$(mktemp)"
+  sed "s|^\([[:space:]]*audit-server-url[[:space:]]*=.*\)$|audit-server-url = '${AUDIT_URL}'|" "$CFG" > "$tmp" && mv "$tmp" "$CFG"
+elif grep -q '^\[options\]' "$CFG" 2>/dev/null; then
+  tmp="$(mktemp)"
+  awk -v u="$AUDIT_URL" '
+    /^\[options\]/ { print; inopts=1; next }
+    /^\[/ && inopts { print "audit-server-url = \x27" u "\x27"; inopts=0 }
+    { print }
+    END { if (inopts) print "audit-server-url = \x27" u "\x27" }
+  ' "$CFG" > "$tmp" && mv "$tmp" "$CFG"
+else
+  printf '\n[options]\naudit-server-url = '"'"'%s'"'"'\n' "$AUDIT_URL" >> "$CFG"
+fi
+echo "已写入 audit-server-url（审计转发地址）：$AUDIT_URL"
+
+# CORS 放行来源：本机 employee 页从 http://<SERVER_IP>:PORT 加载并调用本机 21120，
+# 与本地 API 的收紧策略（§4.3）配套，把该来源写入 [options] api-cors-origin。
+CORS_URL="http://${SERVER_IP}:${PORT}"
+if [ -z "$(sed -n "s/^api-cors-origin *= *'\([^']*\)'.*/\1/p" "$CFG" 2>/dev/null | head -1 || true)" ]; then
+  if grep -q '^\[options\]' "$CFG" 2>/dev/null; then
+    tmp="$(mktemp)"
+    awk -v u="$CORS_URL" '
+      /^\[options\]/ { print; inopts=1; next }
+      /^\[/ && inopts && !done { print "api-cors-origin = \x27" u "\x27"; done=1; inopts=0 }
+      { print }
+      END { if (inopts && !done) print "api-cors-origin = \x27" u "\x27" }
+    ' "$CFG" > "$tmp" && mv "$tmp" "$CFG"
+  else
+    printf '\n[options]\napi-cors-origin = '"'"'%s'"'"'\n' "$CORS_URL" >> "$CFG"
+  fi
+  echo "已写入 api-cors-origin（CORS 放行）：$CORS_URL"
+fi
+
+# 配置文件含 api-token / audit-server-url / api-cors-origin 等敏感项：收紧为仅属主可读写（类 Unix）。
+chmod 0600 "$CFG"
+
 # ---- 2. 启动客户端 GateDesk ------------------------------------------------
 APP=""
 for cand in \
@@ -80,3 +120,6 @@ fi
 URL="${SERVER_BASE}/employee?ticket=${ticket}"
 echo "打开用户页：$URL"
 "$BROWSER" "$URL"
+
+
+
