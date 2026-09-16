@@ -1,10 +1,10 @@
 // GateDesk 服务端 —— 设备中心状态机（设计文档 1.1，2026-09-04 迭代）
 //
-// 角色：用户端 = 客户（受控）；运维端 = 公司内部运维人员（控制）；超级管理员 = 可强制控制的运维。
+// 角色：用户端 = 客户（受控）；运维端 = 公司内部运维人员（控制）。
 // 模型：以「设备」为中心。用户端 GateDesk 启动后网页自动读本机 ID 并上报（上线）；
-//       用户点「请求协助」→ 设备进入 requested；运维点「开始协助」或超管「强制控制」→ assisting；
+//       用户点「请求协助」→ 设备进入 requested；运维点「开始协助」→ assisting；
 //       结束后回到 online。全程无需手填 GateDesk ID。
-// 内存态 PoC：不含持久化 / 真实认证 / 审计 / 限流；「超级管理员」角色由前端声明，服务端仅做弱校验。
+// 内存态 PoC：不含持久化 / 真实认证 / 审计 / 限流；角色由前端声明，服务端仅做弱校验。
 const express = require('express');
 const http = require('http');
 const path = require('path');
@@ -62,7 +62,6 @@ app.use(express.static(path.join(__dirname, 'public')));
 // 设备中心状态机
 //   online ──(request/create 用户点「请求协助」)──▶ requested
 //   requested ──(request/start 运维点「开始协助」)──▶ assisting
-//   online ──(device/force-control 超管「强制控制」)──▶ assisting
 //   assisting ──(request/end 任一端结束)──▶ online
 // 状态只由服务端转换，客户端仅提交意图。
 // ---------------------------------------------------------------------------
@@ -194,11 +193,11 @@ app.get('/api/me', (req, res) => {
   res.json({ ok: true, token: s.token });
 });
 
-// 登录：声明角色。user=客户；operator=运维；superadmin=超级管理员（可强制控制）。
+// 登录：声明角色。user=客户；operator=运维。
 app.post('/api/auth/login', (req, res) => {
   const role = req.body && req.body.role;
-  if (!['user', 'operator', 'superadmin'].includes(role)) {
-    return res.status(400).json({ ok: false, error: 'role 必须是 user / operator / superadmin' });
+  if (!['user', 'operator'].includes(role)) {
+    return res.status(400).json({ ok: false, error: 'role 必须是 user / operator' });
   }
   res.json({ ok: true, role });
 });
@@ -222,7 +221,7 @@ app.post('/api/device/register', (req, res) => {
   res.json({ ok: true, device: toPublic(device) });
 });
 
-// 运维端/超管列出全部设备（含状态：online/requested/assisting）。
+// 运维端列出全部设备（含状态：online/requested/assisting）。
 app.get('/api/devices', (req, res) => {
   const list = [...devices.values()]
     .sort((a, b) => a.lastSeen - b.lastSeen)
@@ -252,21 +251,6 @@ app.post('/api/request/start', (req, res) => {
   broadcast(device.id, { type: 'control-started', deviceId: device.id });
   broadcastState(device);
   audit({ action: 'connect.start', actor: 'operator', device_id: device.id, session_id: device.sessionId, result: 'ok', extra: { via: 'request/start' } });
-  res.json({ ok: true, id: device.id, password: device.password || '', sessionId: device.sessionId });
-});
-
-// 超管「强制控制」：任意 online 设备 → assisting（无需用户点「请求协助」）。
-app.post('/api/device/force-control', (req, res) => {
-  const { deviceId, role } = req.body || {};
-  if (role !== 'superadmin') return res.status(403).json({ ok: false, error: '仅超级管理员可强制控制' });
-  const device = getDevice(deviceId);
-  if (!device) return res.status(404).json({ ok: false, error: '设备不存在或已下线' });
-  if (device.state === 'assisting') return res.status(409).json({ ok: false, error: '协助已在进行中' });
-  device.state = 'assisting';
-  device.sessionId = crypto.randomUUID();
-  broadcast(device.id, { type: 'control-started', deviceId: device.id });
-  broadcastState(device);
-  audit({ action: 'connect.start', actor: 'superadmin', device_id: device.id, session_id: device.sessionId, result: 'ok', extra: { via: 'force-control' } });
   res.json({ ok: true, id: device.id, password: device.password || '', sessionId: device.sessionId });
 });
 
@@ -312,13 +296,33 @@ app.post('/api/audit/clear', (req, res) => {
   res.json({ ok: true, cleared });
 });
 
+// ── 本机 GateDesk 本地 API 代理 ──────────────────────────────────────────────
+// 浏览器跨源直连 127.0.0.1:21120 会被 CORS / Chrome PNA 拦截（页面取不到本机 ID、
+// 控制类操作也不稳）。统一改为：页面同源请求本服务，服务端（与本机 GateDesk 同机、
+// 且持有 API_TOKEN）代发到 21120。页面不再需要携带 token，也彻底绕开浏览器跨源限制。
+app.all('/api/local/*', async (req, res) => {
+  const sub = req.originalUrl.replace(/^\/api\/local/, '') || '/';
+  try {
+    const r = await fetch('http://127.0.0.1:21120' + sub, {
+      method: req.method,
+      headers: { Authorization: `Bearer ${API_TOKEN}`, 'Content-Type': 'application/json' },
+      body: ['GET', 'HEAD'].includes(req.method) ? undefined : JSON.stringify(req.body || {}),
+    });
+    const ct = (r.headers.get('content-type') || '').toLowerCase();
+    const data = ct.includes('application/json') ? await r.json() : await r.text();
+    res.status(r.status).json(data);
+  } catch (e) {
+    res.status(502).json({ ok: false, error: '本机 GateDesk 不可达: ' + e.message });
+  }
+});
+
 app.get('/', (req, res) => res.sendFile(path.join(__dirname, 'public', 'employee.html')));
 app.get('/employee', (req, res) => res.sendFile(path.join(__dirname, 'public', 'employee.html')));
 app.get('/admin', (req, res) => res.sendFile(path.join(__dirname, 'public', 'admin.html')));
 app.get('/audit', (req, res) => res.sendFile(path.join(__dirname, 'public', 'audit.html')));
 
 // ---------------------------------------------------------------------------
-// WebSocket：/ws?deviceId=...&role=user|operator|superadmin
+// WebSocket：/ws?deviceId=...&role=user|operator
 // 同一设备的 user 与 operator 同处一个房间，聊天与状态在此中继。
 // ---------------------------------------------------------------------------
 const server = http.createServer(app);
@@ -347,7 +351,7 @@ wss.on('connection', (ws, req) => {
     if (!msg || msg.type !== 'chat') return;
     const text = String(msg.text || '').trim().slice(0, 1000);
     if (!text) return;
-    const isOperator = role === 'operator' || role === 'superadmin';
+    const isOperator = role === 'operator';
     const entry = {
       from: String(msg.from || (isOperator ? '运维' : '客户')).slice(0, 50),
       role: isOperator ? 'operator' : 'user',

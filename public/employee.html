@@ -229,7 +229,7 @@
         const data = await localJson('/id');
         deviceId = data.id;
         $('deviceLine').innerHTML =
-          '本机 GateDesk ID：<span class="id-num">' + escapeHtml(deviceId) + '</span>';
+          '本机 GateDesk ID：<span class="id-num">' + escapeHtml(deviceId) + '</span><span class="muted" id="selfStatus"></span>';
         // 1) 轮换一个随机连接密码
         currentPassword = randPassword(8);
         await localJson('/password', {
@@ -246,7 +246,20 @@
         if (!reg.ok) throw new Error(reg.error || '上线失败');
         $('sessionCard').hidden = false;
         renderState(reg.device.state);
+        loadSelfStatus();
         connectChat();
+      }
+
+      // 本机 GateDesk 在线状态（是否已登入 rendezvous、能否被协助、是否在会话中）。
+      async function loadSelfStatus() {
+        const el = $('selfStatus');
+        if (!el || !TOKEN) return;
+        const st = await localJson('/status').catch(() => null);
+        if (!st) { el.textContent = ''; return; }
+        let s = st.online ? ' · 在线' : ' · 离线';
+        if (st.assistable) s += ' · 可被协助';
+        if (st.in_session) s += ' · 会话中';
+        el.textContent = s;
       }
 
       async function requestHelp() {
@@ -322,6 +335,7 @@
           $('deviceErr').textContent = e.message;
           $('retryBtn').hidden = false;
         }
+        setInterval(loadSelfStatus, 5000);
       }
 
       $('retryBtn').addEventListener('click', init);
