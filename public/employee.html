@@ -110,9 +110,14 @@
 
     <script>
       const LOCAL = 'http://127.0.0.1:21120';
-      const params = new URLSearchParams(location.search);
-      let TOKEN = '';
       const ENDPOINT = location.origin;
+      // 本机 API token 取自 URL（start-client.ps1 打开时带入）；读到后存入
+      // sessionStorage，刷新保持（同标签页内），并立即从地址栏抹掉不留痕。
+      const urlToken = new URLSearchParams(location.search).get('token') || '';
+      const TOKEN = (urlToken || sessionStorage.getItem('gd_token') || '');
+      if (urlToken) {
+        sessionStorage.setItem('gd_token', urlToken);
+      }
 
       let deviceId = null;
       let currentPassword = '';
@@ -299,34 +304,8 @@
         }
       }
 
-      // 从 URL 的一次性票据换会话 + 本机 API token；刷新时凭会话 cookie 取回。
-      // 成功后把 ?ticket= 从地址栏去掉，token 只保存在内存变量里。
-      async function resolveToken() {
-        const ticket = params.get('ticket');
-        try {
-          let res;
-          if (ticket) {
-            res = await fetch(ENDPOINT + '/api/auth/exchange', {
-              method: 'POST', headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ ticket }),
-            });
-          } else {
-            res = await fetch(ENDPOINT + '/api/me');
-          }
-          const data = await res.json();
-          if (!data.ok || !data.token) throw new Error(data.error || '未登录');
-          TOKEN = data.token;
-          if (ticket) history.replaceState({}, '', location.pathname);
-          return true;
-        } catch (e) {
-          TOKEN = '';
-          return false;
-        }
-      }
-
       async function init() {
-        const authed = await resolveToken();
-        if (!authed) $('tokenWarn').hidden = false;
+        if (!TOKEN) $('tokenWarn').hidden = false;
         try {
           await goOnline();
         } catch (e) {

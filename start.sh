@@ -2,8 +2,8 @@
 # GateDesk 运维机启动脚本（macOS）
 # 1) 确保本机 GateDesk 配置里有 api-token（无则生成）；后台页靠它调用本机 21120，故必须保留。
 # 2) 启动 GateDesk、启动 server.js（带 token）。
-# 3) 向服务端要一次性票据，打开后台 /admin?ticket=...（页面用票据换会话拿 token，远程控制可用）。
-# 注：token 不进 URL，启动票据单次有效、5 分钟过期。
+# 3) 打开后台 /admin?token=...（页面用它调本机 21120，远程控制可用）。
+# 注：token 进 URL，页面直连本机 21120。
 set -euo pipefail
 
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -64,11 +64,5 @@ else
   sleep 1
 fi
 
-# 取一次性票据，打开后台
-ticket="$(curl -fsS -X POST "$SERVER_URL/api/launch" \
-  | python3 -c 'import sys,json;print(json.load(sys.stdin)["ticket"])' 2>/dev/null || true)"
-if [ -z "$ticket" ]; then
-  echo "错误：无法从服务端获取启动票据（确认 server.js 已带 token 启动）。" >&2
-  exit 1
-fi
-"$BROWSER" "$SERVER_URL/admin?ticket=${ticket}"
+# 打开运维端后台（token 直接进 URL，页面用它调本机 21120）
+"$BROWSER" "$SERVER_URL/admin?token=${token}"

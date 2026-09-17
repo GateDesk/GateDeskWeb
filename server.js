@@ -14,46 +14,11 @@ const { WebSocketServer } = require('ws');
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// API token：页面用它调用本机 GateDesk 本地 API（127.0.0.1:21120）。优先取环境变量
-// （start.sh 启动时传入），否则兜底从 GateDesk 配置读取，便于直接 `node server.js`。
-function readTokenFromConfig() {
-  try {
-    const fs = require('fs');
-    const toml = fs.readFileSync(
-      path.join(process.env.HOME || '', 'Library', 'Preferences', 'com.carriez.GateDesk', 'GateDesk2.toml'),
-      'utf8',
-    );
-    const m = toml.match(/^api-token\s*=\s*'([^']*)'/m);
-    return m ? m[1] : '';
-  } catch {
-    return '';
-  }
-}
-const API_TOKEN = process.env.API_TOKEN || readTokenFromConfig();
-
-// 一次性启动票据 + 会话：start.sh / start-client.sh 经 POST /api/launch 取票据放进
-// 页面 URL，页面用它换 HttpOnly 会话 cookie，token 不再以明文出现在 URL / 历史里。
-const tickets = new Map();  // ticket -> { expiresAt }
-const sessions = new Map(); // sid -> { token, expiresAt }
-const TICKET_TTL = 5 * 60 * 1000;
-const SESSION_TTL = 12 * 60 * 60 * 1000;
-
-function parseCookies(req) {
-  const out = {};
-  for (const part of ((req.headers && req.headers.cookie) || '').split(';')) {
-    const i = part.indexOf('=');
-    if (i >= 0) out[part.slice(0, i).trim()] = part.slice(i + 1).trim();
-  }
-  return out;
-}
-
-function sessionByReq(req) {
-  const sid = parseCookies(req).gd_session;
-  const s = sid && sessions.get(sid);
-  if (!s) return null;
-  if (Date.now() > s.expiresAt) { sessions.delete(sid); return null; }
-  return s;
-}
+// API token：仅供本服务保留的注入值。页面（employee / admin）从 URL 取本机 token，
+// 直连各机 loopback 127.0.0.1:21120 调用 GateDesk 本地 API；本服务只做设备中心与审计，
+// 不再代发本地 API。API_TOKEN 仅接受启动脚本注入（start.sh 带 token 启动 server），
+// 不从配置文件读取——避免服务端自行去翻 GateDesk 配置文件里的 token。
+const API_TOKEN = process.env.API_TOKEN || '';
 
 app.use(express.json({ limit: '64kb' }));
 app.use(express.static(path.join(__dirname, 'public')));
@@ -158,42 +123,7 @@ app.get('/api/health', (req, res) => {
   res.json({ ok: true, service: 'GateDesk API', time: new Date().toISOString() });
 });
 
-// 启动脚本获取一次性票据（未鉴权；token 只用于各机 loopback 21120，不跨机直接可达）。
-app.post('/api/launch', (req, res) => {
-  const ticket = crypto.randomBytes(24).toString('hex');
-  tickets.set(ticket, { expiresAt: Date.now() + TICKET_TTL });
-  res.json({ ok: true, ticket });
-});
-
-// 页面首次加载：用一次性票据换 HttpOnly 会话 cookie + 本机 API token。
-app.post('/api/auth/exchange', (req, res) => {
-  const ticket = String((req.body || {}).ticket || '');
-  const t = tickets.get(ticket);
-  if (!t || Date.now() > t.expiresAt) {
-    tickets.delete(ticket);
-    return res.status(401).json({ ok: false, error: '票据无效或已过期' });
-  }
-  tickets.delete(ticket); // 单次有效
-  if (!API_TOKEN) {
-    return res.status(500).json({ ok: false, error: '服务端未配置 API_TOKEN' });
-  }
-  const sid = crypto.randomBytes(24).toString('hex');
-  sessions.set(sid, { token: API_TOKEN, expiresAt: Date.now() + SESSION_TTL });
-  res.setHeader(
-    'Set-Cookie',
-    `gd_session=${sid}; HttpOnly; SameSite=Lax; Path=/; Max-Age=${Math.floor(SESSION_TTL / 1000)}`,
-  );
-  res.json({ ok: true, token: API_TOKEN });
-});
-
-// 刷新 / 后续请求：凭会话 cookie 取本机 API token。
-app.get('/api/me', (req, res) => {
-  const s = sessionByReq(req);
-  if (!s) return res.status(401).json({ ok: false, error: '未登录或会话已过期' });
-  res.json({ ok: true, token: s.token });
-});
-
-// 登录：声明角色。user=客户；operator=运维。
+// 登录：声明角色。user=客户；operator=运维。（PoC 弱校验，仅用于前端文案/布局区分）
 app.post('/api/auth/login', (req, res) => {
   const role = req.body && req.body.role;
   if (!['user', 'operator'].includes(role)) {
@@ -296,12 +226,15 @@ app.post('/api/audit/clear', (req, res) => {
   res.json({ ok: true, cleared });
 });
 
-// ── 本机 GateDesk 本地 API 代理 ──────────────────────────────────────────────
-// 浏览器跨源直连 127.0.0.1:21120 会被 CORS / Chrome PNA 拦截（页面取不到本机 ID、
-// 控制类操作也不稳）。统一改为：页面同源请求本服务，服务端（与本机 GateDesk 同机、
-// 且持有 API_TOKEN）代发到 21120。页面不再需要携带 token，也彻底绕开浏览器跨源限制。
+// ── 本机 GateDesk 本地 API 代理（admin 运维页用）────────────────────────────
+// admin 页把本机 token 随请求带来（?token=），服务端校验其与自身 API_TOKEN（env 注入）
+// 一致才代发到 127.0.0.1:21120——别人拿不到 token 则 401，代理不再是无鉴权开口。
 app.all('/api/local/*', async (req, res) => {
-  const sub = req.originalUrl.replace(/^\/api\/local/, '') || '/';
+  const provided = new URL(req.url, 'http://x').searchParams.get('token') || '';
+  if (!API_TOKEN || provided !== API_TOKEN) {
+    return res.status(401).json({ ok: false, error: 'token 无效' });
+  }
+  const sub = req.originalUrl.replace(/^\/api\/local/, ''); // 含原 ?token=，21120 亦按此校验
   try {
     const r = await fetch('http://127.0.0.1:21120' + sub, {
       method: req.method,

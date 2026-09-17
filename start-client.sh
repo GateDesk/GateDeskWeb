@@ -4,7 +4,7 @@
 # 在【用户机】上运行：
 #   1. 把运维端给的 api-token 写入本机 GateDesk 配置（GateDesk2.toml [options]）
 #   2. 启动本机 GateDesk（GateDesk.app 与脚本同级目录，或 target/ 下）
-#   3. 向运维机服务端要一次性票据，打开用户页 http://<ip>:3000/employee?ticket=...（服务端由此获得本机 GateDesk ID）
+#   3. 打开用户页 http://<ip>:3000/employee?token=<token>（页面用它调本机 21120，服务端由此获得本机 GateDesk ID）
 #
 # 用法:
 #   start-client.sh <api-token> [server-ip]
@@ -12,7 +12,7 @@
 #     server-ip : 运维机局域网 IP（默认 127.0.0.1，单机调试时用）
 #
 # 注意：api-token 由 GateDesk 启动时缓存，若 GateDesk 已在运行而本次写入/变更了 token，
-#       需先退出 GateDesk 再重跑，否则本地 API 返回 401。token 不进 URL，仅用于本地 API。
+#       需先退出 GateDesk 再重跑，否则本地 API 返回 401。token 同时用于本机本地 API 与页面 URL。
 set -euo pipefail
 
 TOKEN="${1:-}"
@@ -109,15 +109,9 @@ else
 fi
 
 # ---- 3. 打开用户页（服务端由此获得本机 GateDesk ID）-------------------------
-# 向运维机服务端要一次性票据（token 不放进 URL），页面用票据换会话后拿 token。
+# token 直接进 URL，页面用它调本机（受控端）21120 读取本机 ID 并上报。
 SERVER_BASE="http://${SERVER_IP}:${PORT}"
-ticket="$(curl -fsS -X POST "$SERVER_BASE/api/launch" \
-  | python3 -c 'import sys,json;print(json.load(sys.stdin)["ticket"])' 2>/dev/null || true)"
-if [ -z "$ticket" ]; then
-  echo "错误：无法从 ${SERVER_BASE} 获取启动票据。确认运维机 start.sh 已运行。" >&2
-  exit 1
-fi
-URL="${SERVER_BASE}/employee?ticket=${ticket}"
+URL="${SERVER_BASE}/employee?token=${TOKEN}"
 echo "打开用户页：$URL"
 "$BROWSER" "$URL"
 

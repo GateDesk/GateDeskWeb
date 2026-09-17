@@ -120,6 +120,14 @@
 
     <script>
       const ENDPOINT = location.origin;
+      // 本机 GateDesk 本地 API token 取自 URL（start.sh 打开时带入）；读到后存入
+      // sessionStorage，刷新保持（同标签页内）。
+      const urlToken = new URLSearchParams(location.search).get('token') || '';
+      const TOKEN = (urlToken || sessionStorage.getItem('gd_token') || '');
+      if (urlToken) {
+        sessionStorage.setItem('gd_token', urlToken);
+        // history.replaceState({}, '', location.pathname);
+      }
 
       let role = 'operator';
       let activeDevice = null;
@@ -130,9 +138,9 @@
       const $ = (id) => document.getElementById(id);
 
       async function localJson(path, options) {
-        // 本机 GateDesk 操作统一走服务端 /api/local 代理（同源），绕开浏览器直连
-        // 127.0.0.1:21120 的 CORS / PNA 限制，页面无需携带本地 token。
-        const res = await fetch(ENDPOINT + '/api/local' + path, {
+        // 本机 GateDesk 操作走服务端 /api/local 代理（同源），token 随请求带上由服务端校验。
+        const sep = path.includes('?') ? '&' : '?';
+        const res = await fetch(ENDPOINT + '/api/local' + path + sep + 'token=' + encodeURIComponent(TOKEN), {
           method: (options && options.method) || 'GET',
           headers: { 'Content-Type': 'application/json' },
           body: (options && options.body) || undefined,
