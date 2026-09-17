@@ -132,7 +132,6 @@
       async function localJson(path, options) {
         // 本机 GateDesk 操作统一走服务端 /api/local 代理（同源），绕开浏览器直连
         // 127.0.0.1:21120 的 CORS / PNA 限制，页面无需携带本地 token。
-        console.log("res11:" + res11);
         const res = await fetch(ENDPOINT + '/api/local' + path, {
           method: (options && options.method) || 'GET',
           headers: { 'Content-Type': 'application/json' },
