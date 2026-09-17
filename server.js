@@ -79,8 +79,19 @@ function updateClientOnline(deviceId) {
   d.clientOnline = !!(room && [...room].some((s) => s.role === 'user' && s.readyState === 1));
 }
 
+// 受控端心跳间隔 5s；超过该阈值无心跳视为离线（列表据此显示在线/离线）。
+const STALE_MS = 15000;
+
 function toPublic(device) {
-  return { id: device.id, state: device.state, lastSeen: device.lastSeen, clientOnline: !!device.clientOnline };
+  return {
+    id: device.id,
+    state: device.state,
+    lastSeen: device.lastSeen,
+    clientOnline: !!device.clientOnline,
+    online: Date.now() - device.lastSeen < STALE_MS, // 页面/心跳存活
+    gdOnline: !!device.gdOnline,                      // GateDesk 是否已登入 rendezvous
+    inSession: !!device.inSession,                    // GateDesk 是否在会话中
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -160,6 +171,16 @@ app.post('/api/device/register', (req, res) => {
   broadcastState(device);
   audit({ action: 'device.register', actor: 'device', device_id: device.id, result: 'ok' });
   res.json({ ok: true, device: toPublic(device) });
+});
+
+// 受控端心跳：受控页每 5s 上报一次，维持 lastSeen（页面存活）并带本机 GateDesk /status 快照。
+app.post('/api/device/heartbeat', (req, res) => {
+  const device = getDevice((req.body || {}).id);
+  if (!device) return res.status(404).json({ ok: false, error: '设备不存在或已下线' });
+  device.lastSeen = Date.now();
+  device.gdOnline = !!(req.body || {}).online;
+  device.inSession = !!(req.body || {}).inSession;
+  res.json({ ok: true });
 });
 
 // 运维端列出全部设备（含状态：online/requested/assisting）。

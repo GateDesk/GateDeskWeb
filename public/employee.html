@@ -252,20 +252,39 @@
         if (!reg.ok) throw new Error(reg.error || '上线失败');
         $('sessionCard').hidden = false;
         renderState(reg.device.state);
-        loadSelfStatus();
+        refreshStatus();
         connectChat();
       }
 
-      // 本机 GateDesk 在线状态（是否已登入 rendezvous、能否被协助、是否在会话中）。
-      async function loadSelfStatus() {
-        const el = $('selfStatus');
-        if (!el || !TOKEN) return;
-        const st = await localJson('/status').catch(() => null);
-        if (!st) { el.textContent = ''; return; }
-        let s = st.online ? ' · 在线' : ' · 离线';
-        if (st.assistable) s += ' · 可被协助';
-        if (st.in_session) s += ' · 会话中';
-        el.textContent = s;
+      // 本机 GateDesk 状态（是否登入 rendezvous、可被协助、会话中）：读一次 → 刷徽章 + 连同页面存活一起上报。
+      async function refreshStatus() {
+        if (deviceId) {
+          const st = await localJson('/status').catch(() => null);
+          const el = $('selfStatus');
+          if (el && st) {
+            let s = st.online ? ' · 在线' : ' · 离线';
+            if (st.assistable) s += ' · 可被协助';
+            if (st.in_session) s += ' · 会话中';
+            el.textContent = s;
+          }
+          sendHeartbeat(st);
+          return;
+        }
+        sendHeartbeat(null);
+      }
+
+      // 向服务端上报：页面存活（本次调用本身）+ 本机 GateDesk 的 /status 快照。
+      function sendHeartbeat(st) {
+        if (!deviceId) return;
+        fetch(ENDPOINT + '/api/device/heartbeat', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            id: deviceId,
+            online: !!(st && st.online),
+            assistable: !!(st && st.assistable),
+            inSession: !!(st && st.in_session),
+          }),
+        }).catch(() => {});
       }
 
       async function requestHelp() {
@@ -315,7 +334,8 @@
           $('deviceErr').textContent = e.message;
           $('retryBtn').hidden = false;
         }
-        setInterval(loadSelfStatus, 5000);
+        // 定时：刷新本机在线状态 + 向服务端报心跳（维持设备在线/离线判定）。
+        setInterval(refreshStatus, 5000);
       }
 
       $('retryBtn').addEventListener('click', init);

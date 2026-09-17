@@ -30,6 +30,8 @@
       }
       .status-pill.requested { background: #fef3c7; color: #92400e; }
       .status-pill.assisting { background: #dcfce7; color: #166534; }
+      .status-pill.offline { background: #e5e7eb; color: #6b7280; }
+      .status-pill.gd-offline { background: #fef9c3; color: #a16207; }
       .meta { color: #4b5563; font-size: 14px; }
       .banner { padding: 12px 14px; border-radius: 10px; font-size: 14px; margin-bottom: 16px; }
       .banner.warn { background: #fef3c7; color: #92400e; border: 1px solid #fde68a; }
@@ -162,7 +164,17 @@
         online: '在线',
         requested: '已请求协助',
         assisting: '协助中',
+        offline: '离线',
+        'gd-offline': 'GateDesk离线',
       };
+
+      // 显示状态三档：页面没了→离线；页面在但 GateDesk 未登入→GateDesk离线；否则按交互状态。
+      function devStatus(d) {
+        if (!d.online) return 'offline';
+        if (!d.gdOnline) return 'gd-offline';
+        if (d.inSession || d.state === 'assisting') return 'assisting';
+        return d.state === 'requested' ? 'requested' : 'online';
+      }
 
       function pill(state) {
         return `<span class="status-pill ${state}">${stateMap[state] || state}</span>`;
@@ -205,7 +217,7 @@
           return `
           <div class="item">
             <div class="left">
-              <div><span class="id-num">${escapeHtml(d.id)}</span> ${pill(d.state)}</div>
+              <div><span class="id-num">${escapeHtml(d.id)}</span> ${pill(devStatus(d))}</div>
               <div class="meta">最近在线：${new Date(d.lastSeen).toLocaleString()}</div>
             </div>
             <div class="actions">
