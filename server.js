@@ -59,6 +59,7 @@ function broadcastState(device) {
 function joinRoom(deviceId, ws) {
   if (!wsRooms.has(deviceId)) wsRooms.set(deviceId, new Set());
   wsRooms.get(deviceId).add(ws);
+  updateClientOnline(deviceId);
 }
 
 function leaveRoom(deviceId, ws) {
@@ -66,10 +67,20 @@ function leaveRoom(deviceId, ws) {
   if (!room) return;
   room.delete(ws);
   if (room.size === 0) wsRooms.delete(deviceId);
+  updateClientOnline(deviceId);
+}
+
+// 设备是否有在线的「客户端（用户角色）」连接——即本机 employee 页是否开着。
+// admin 借它区分「本机作为受控端」与「只有运维端」，以决定是否显示/可否与自身 ID 聊天。
+function updateClientOnline(deviceId) {
+  const room = wsRooms.get(deviceId);
+  const d = devices.get(deviceId);
+  if (!d) return;
+  d.clientOnline = !!(room && [...room].some((s) => s.role === 'user' && s.readyState === 1));
 }
 
 function toPublic(device) {
-  return { id: device.id, state: device.state, lastSeen: device.lastSeen };
+  return { id: device.id, state: device.state, lastSeen: device.lastSeen, clientOnline: !!device.clientOnline };
 }
 
 // ---------------------------------------------------------------------------
@@ -140,7 +151,7 @@ app.post('/api/device/register', (req, res) => {
   }
   let device = devices.get(String(id));
   if (!device) {
-    device = { id: String(id), password: '', state: 'online', lastSeen: Date.now(), messages: [], sessionId: null };
+    device = { id: String(id), password: '', state: 'online', lastSeen: Date.now(), messages: [], sessionId: null, clientOnline: false };
     devices.set(device.id, device);
   }
   device.password = String(password || '');
@@ -275,7 +286,7 @@ wss.on('connection', (ws, req) => {
   ws.deviceId = deviceId;
   joinRoom(deviceId, ws);
 
-  sendJson(ws, { type: 'history', messages: device.messages });
+  sendJson(ws, { type: 'history', messages: device.messages.filter((m) => m.role !== role) });
   sendJson(ws, statePayload(device));
 
   ws.on('message', (raw) => {
@@ -295,7 +306,8 @@ wss.on('connection', (ws, req) => {
     if (device.messages.length > 500) device.messages.splice(0, device.messages.length - 500);
     const out = JSON.stringify({ type: 'chat', message: entry });
     const room = wsRooms.get(deviceId);
-    if (room) for (const s of room) if (s.readyState === 1) s.send(out);
+    // 只投递给对端角色（运维↔客户），同角色不互通，避免 admin 自己和自己聊天。
+    if (room) for (const s of room) if (s.readyState === 1 && s.role !== role) s.send(out);
   });
 
   ws.on('close', () => leaveRoom(deviceId, ws));

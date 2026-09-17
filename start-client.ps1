@@ -30,48 +30,46 @@ param(
 
 $ErrorActionPreference = "Stop"
 
-function Write-Token {
-    <# 把 token 写入 GateDesk2.toml 的 [options]（绝不新增重复表头） #>
+# 把 key = 'value' 写入 GateDesk2.toml 的 [options]：已有该 key 行原地替换，
+# 有 [options] 段则插入段内，都没有则追加新表（绝不新增重复表头）。
+function Set-GDConfig {
+    param([string]$Key, [string]$Value)
     $cfgDir = Join-Path $env:APPDATA "GateDesk\config"
     $cfg = Join-Path $cfgDir "GateDesk2.toml"
     New-Item -ItemType Directory -Force -Path $cfgDir | Out-Null
 
     $lines = if (Test-Path $cfg) { @(Get-Content $cfg) } else { @() }
-    $tokenLine = "api-token = '$Token'"
+    $line = "$Key = '$Value'"
 
-    # 1) 已有 api-token 行 -> 原地替换
+    # 1) 已有该 key 行 -> 原地替换
     for ($i = 0; $i -lt $lines.Count; $i++) {
-        if ($lines[$i] -match '^\s*api-token\s*=') {
-            $lines[$i] = $tokenLine
+        if ($lines[$i] -match "^\s*$Key\s*=") {
+            $lines[$i] = $line
             Set-Content -Path $cfg -Value $lines
-            Write-Host "已写入 api-token：$cfg"
             return
         }
     }
 
-    # 2) 有 [options] 段但无 api-token -> 插入段内
+    # 2) 有 [options] 段但无该 key -> 插入段内（下一个表头之前，没有则文件尾）
     for ($i = 0; $i -lt $lines.Count; $i++) {
         if ($lines[$i] -match '^\[options\]') {
-            # 找到下一个表头（若存在）的插入点；否则追加到文件尾
             $insertAt = $lines.Count
             for ($j = $i + 1; $j -lt $lines.Count; $j++) {
                 if ($lines[$j] -match '^\s*\[') { $insertAt = $j; break }
             }
             $newLines = New-Object System.Collections.Generic.List[string]
             for ($k = 0; $k -lt $lines.Count; $k++) {
-                if ($k -eq $insertAt) { $newLines.Add($tokenLine) }
+                if ($k -eq $insertAt) { $newLines.Add($line) }
                 $newLines.Add($lines[$k])
             }
-            if ($insertAt -eq $lines.Count) { $newLines.Add($tokenLine) }
+            if ($insertAt -eq $lines.Count) { $newLines.Add($line) }
             Set-Content -Path $cfg -Value $newLines
-            Write-Host "已写入 api-token：$cfg"
             return
         }
     }
 
     # 3) 无 [options] 段 -> 追加新表
-    Add-Content -Path $cfg -Value "`n[options]`n$tokenLine"
-    Write-Host "已写入 api-token：$cfg"
+    Add-Content -Path $cfg -Value "`n[options]`n$line"
 }
 
 function Find-GateDeskExe {
@@ -94,18 +92,23 @@ function Find-GateDeskExe {
     return ""
 }
 
-function Build-UserPageUrl {
-    param([string]$Server, [int]$Port, [string]$Token)
-    # 去掉两端空白与末尾 /，兼容 user 输入 http://host/ 之类
+function Build-BaseUrl {
+    # 去掉 path / 尾部斜杠，返回 http(s)://host[:port] 基址
+    param([string]$Server, [int]$Port)
     $s = $Server.Trim().TrimEnd('/')
     $hasScheme = $s -match '^https?://'
     $hasPort = $s -match ':\d+$'
     if ($hasScheme) {
-        if ($hasPort) { return "${s}/employee?token=${Token}" }
-        return "${s}:${Port}/employee?token=${Token}"
+        if ($hasPort) { return $s }
+        return "${s}:${Port}"
     }
-    if ($hasPort) { return "http://${s}/employee?token=${Token}" }
-    return "http://${s}:${Port}/employee?token=${Token}"
+    if ($hasPort) { return "http://${s}" }
+    return "http://${s}:${Port}"
+}
+
+function Build-UserPageUrl {
+    param([string]$Server, [int]$Port, [string]$Token)
+    return (Build-BaseUrl -Server $Server -Port $Port) + "/employee?token=${Token}"
 }
 
 # ---- 0. 参数校验 ------------------------------------------------------------
@@ -116,8 +119,13 @@ if ([string]::IsNullOrWhiteSpace($Token)) {
     exit 1
 }
 
-# ---- 1. 写入 api-token -------------------------------------------------------
-Write-Token
+# ---- 1. 写入 GateDesk 配置：token / CORS 白名单 / 审计转发地址 ----------------
+# 页面从运维机 <server>:<port> 跨源加载，须把该源写进本机 GateDesk 的 api-cors-origin，
+# 否则本机 21120 会以 403 拒绝跨源请求（员工页读不到本机 ID）。
+$base = Build-BaseUrl -Server $Server -Port $Port
+Set-GDConfig -Key 'api-token' -Value $Token
+Set-GDConfig -Key 'api-cors-origin' -Value $base
+Set-GDConfig -Key 'audit-server-url' -Value "$base/api/audit"
 
 # ---- 2. 启动客户端 GateDesk --------------------------------------------------
 $exe = Find-GateDeskExe

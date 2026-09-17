@@ -134,6 +134,7 @@
       let ws = null;
       let voiceOn = false;
       let nativeActive = false; // 本机已通过 /connect 发起原生会话且尚未结束
+      let selfId = null; // 运维机自己的 GateDesk ID，设备列表里排除，避免自己和自己聊天
 
       const $ = (id) => document.getElementById(id);
 
@@ -187,11 +188,14 @@
       }
 
       function renderList(devices) {
-        if (!devices.length) {
+        // 自身设备（本机 GateDesk ID）只有在「本机同时作为客户端在跑 employee」时才列出来，
+        // 否则不显示、也就无法自己和自己聊天。真实客户设备恒显示。
+        const others = devices.filter((d) => d.id !== selfId || d.clientOnline === true);
+        if (!others.length) {
           $('deviceList').innerHTML = '<div class="item"><span class="muted">当前无在线客户设备。请客户先打开本机 GateDesk 并运行 start-client.sh。</span></div>';
           return;
         }
-        $('deviceList').innerHTML = devices.map((d) => {
+        $('deviceList').innerHTML = others.map((d) => {
           let action = '';
           if (d.state === 'requested') {
             action = `<button class="control-btn" data-act="start" data-id="${escapeHtml(d.id)}">开始协助</button>`;
@@ -280,6 +284,7 @@
       function sendChat() {
         const text = $('chatInput').value.trim();
         if (!text || !ws || ws.readyState !== 1) return;
+        appendMessage({ from: '运维', role: 'operator', text, at: Date.now() });
         ws.send(JSON.stringify({ type: 'chat', from: '运维', text }));
         $('chatInput').value = '';
       }
@@ -421,6 +426,8 @@
         try {
           const id = await localJson('/id');
           $('selfIdText').textContent = id.id || '-';
+          selfId = id.id || null;
+          if (!activeDevice) loadDevices(); // 已知本机 ID 后重列，去掉自己的设备
         } catch (e) {
           $('selfIdText').textContent = '-';
           badge.textContent = '（无法读取本机 GateDesk）';
