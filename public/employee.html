@@ -63,6 +63,30 @@
       .chat-input-row { display: flex; gap: 8px; padding: 10px; background: #fff; }
       .chat-input-row input { flex: 1; font-size: 14px; padding: 10px 12px; border: 1px solid #d1d5db; border-radius: 8px; }
       .chat-input-row button { padding: 10px 16px; font-size: 14px; background: #2563eb; }
+      /* 被控端批准：接入与控制都要本机点头（GateDesk-api.md §6.7） */
+      .approval-item {
+        border: 1px solid #e5e7eb; border-radius: 10px; padding: 12px; margin-bottom: 10px;
+        background: #fff; display: grid; gap: 8px;
+      }
+      .approval-item:last-child { margin-bottom: 0; }
+      .approval-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+      .badge {
+        border-radius: 999px; padding: 3px 10px; font-size: 12px; font-weight: bold;
+        background: #e5e7eb; color: #374151;
+      }
+      .badge.wait { background: #fef3c7; color: #92400e; }
+      .badge.ctrl { background: #fee2e2; color: #991b1b; }
+      .badge.live { background: #dcfce7; color: #166534; }
+      .control-ask {
+        background: #fef2f2; border: 1px solid #fecaca; border-radius: 8px;
+        padding: 8px 10px; color: #991b1b; font-size: 14px;
+      }
+      .control-ask .countdown { font-family: monospace; font-weight: bold; }
+      .perm { display: inline-flex; align-items: center; gap: 5px; font-size: 14px; color: #374151; }
+      .btn-small { padding: 8px 14px; font-size: 14px; }
+      .btn-allow { background: #16a34a; }
+      .btn-deny { background: #6b7280; }
+      #approvalNote { font-size: 13px; min-height: 18px; color: #166534; }
     </style>
   </head>
   <body>
@@ -98,6 +122,17 @@
         </div>
       </div>
 
+      <div id="approvalCard" class="card">
+        <h3>接入与控制批准</h3>
+        <div class="kv">
+          本机作为被控端：对端要进来、要操作您的键盘鼠标，都得您在这里点头。
+          接入后默认只读，控制请求 60 秒内不处理按拒绝算。
+        </div>
+        <div class="kv" id="approvalState">正在读取会话…</div>
+        <div id="approvalList"></div>
+        <div id="approvalNote"></div>
+      </div>
+
       <div class="chat" id="chatPanel" hidden>
         <div class="chat-head">与运维人员聊天</div>
         <div class="chat-msgs" id="chatMsgs"></div>
@@ -131,7 +166,11 @@
         const res = await fetch(LOCAL + path + sep + 'token=' + encodeURIComponent(TOKEN), options);
         let body = null;
         try { body = await res.json(); } catch { }
-        if (!res.ok) throw new Error((body && body.error) || ('HTTP ' + res.status));
+        if (!res.ok) {
+          const err = new Error((body && body.error) || ('HTTP ' + res.status));
+          err.status = res.status; // 调用方需要区分 409/503/504（GateDesk-api.md §7）
+          throw err;
+        }
         return body;
       }
 
@@ -324,6 +363,243 @@
         }
       }
 
+      // ── 被控端批准：接入 / 控制 / 权限（GateDesk-api.md §6.7）────────────────
+      // 本地 API 没有推送通道（§8.1 要求平台也轮询），所以靠轮询 GET /sessions 发现
+      // authorized=false（有人在请求接入）与 pending_control=true（有人在请求接管键鼠）。
+      const CONTROL_WINDOW_MS = 60000; // 与控制层 CONTROL_REQUEST_TIMEOUT 对齐
+      const SESSIONS_POLL_MS = 2000;   // 必须显著小于 60 秒，否则会错过控制窗口
+      // §6.7.4 白名单里打算给客户看的四项。restart / recording 偏运维，block_input 仅
+      // Windows，privacy_mode 要看平台有没有实现，这三类留给桌面端面板。
+      const PERMISSIONS = [
+        { name: 'keyboard', label: '键鼠' },
+        { name: 'clipboard', label: '剪贴板' },
+        { name: 'audio', label: '声音' },
+        { name: 'file', label: '文件传输' },
+      ];
+      const pendingSince = new Map(); // 会话 id -> 首次看到 pending_control 的时刻
+      let sessionsSig = '';
+      let noteTimer = null;
+
+      function sessionPeer(s) {
+        return (s.name || '').trim() || s.peer_id || '未知对端';
+      }
+
+      // 只有远程桌面类会话有这套权限开关；文件传输 / 摄像头 / 终端没有键鼠可给。
+      function isDesktopSession(s) {
+        return !s.is_file_transfer && !s.is_view_camera && !s.is_terminal && !s.port_forward;
+      }
+
+      function sessionBadge(s) {
+        if (s.disconnected) return '<span class="badge">已结束</span>';
+        if (!s.authorized) return '<span class="badge wait">等待接入</span>';
+        if (s.pending_control) return '<span class="badge ctrl">请求控制</span>';
+        return '<span class="badge live">协助中</span>';
+      }
+
+      function actionBtn(act, id, label, cls, accept) {
+        const extra = accept === undefined ? '' : ` data-accept="${accept}"`;
+        return `<button class="btn-small ${cls}" data-act="${act}" data-id="${id}"${extra}>${label}</button>`;
+      }
+
+      function sessionHtml(s) {
+        const out = ['<div class="approval-item">'];
+        out.push(
+          `<div class="approval-head"><b>${escapeHtml(sessionPeer(s))}</b>` +
+            `<span class="kv">ID ${escapeHtml(s.peer_id || '—')}</span>${sessionBadge(s)}</div>`
+        );
+        if (!s.authorized && !s.disconnected) {
+          out.push('<div class="kv">该对端正在请求接入本机。</div>');
+          out.push(
+            '<div class="row">' +
+              actionBtn('approve', s.id, '允许接入', 'btn-allow', true) +
+              actionBtn('approve', s.id, '拒绝', 'btn-deny', false) +
+              '</div>'
+          );
+        }
+        if (s.pending_control) {
+          const since = pendingSince.get(s.id) || Date.now();
+          out.push(
+            '<div class="control-ask">对端请求接管本机键盘鼠标，还有 ' +
+              `<span class="countdown" data-deadline="${since + CONTROL_WINDOW_MS}">…</span>，` +
+              '超时按拒绝处理。</div>'
+          );
+          out.push(
+            '<div class="row">' +
+              actionBtn('control', s.id, '允许控制', 'btn-allow', true) +
+              actionBtn('control', s.id, '拒绝控制', 'btn-deny', false) +
+              '</div>'
+          );
+        }
+        if (s.authorized && !s.disconnected && isDesktopSession(s)) {
+          out.push(
+            '<div class="kv">权限（与「允许控制」是两道独立的闸门，都给了对端才能真正操作键鼠）：</div>'
+          );
+          out.push(
+            '<div class="row">' +
+              PERMISSIONS.map(
+                (p) =>
+                  `<label class="perm"><input type="checkbox" data-act="permission" ` +
+                  `data-id="${s.id}" data-name="${p.name}"${s[p.name] ? ' checked' : ''}> ${p.label}</label>`
+              ).join('') +
+              '</div>'
+          );
+        }
+        out.push('<div class="row">');
+        out.push(
+          s.disconnected
+            ? actionBtn('dismiss', s.id, '清理', 'btn-deny')
+            : actionBtn('terminate', s.id, '结束该会话', 'btn-end')
+        );
+        out.push('</div></div>');
+        return out.join('');
+      }
+
+      function sessionsSignature(list) {
+        return list
+          .map((s) =>
+            [
+              s.id, s.authorized, s.disconnected, s.pending_control,
+              s.keyboard, s.clipboard, s.audio, s.file,
+              s.name, s.peer_id,
+            ].join(',')
+          )
+          .join('|');
+      }
+
+      function renderApprovals(list) {
+        const sig = sessionsSignature(list);
+        // 内容没变就别重建 DOM——重建会闪，也会把倒计时重新起算。
+        if (sig === sessionsSig) return;
+        sessionsSig = sig;
+        $('approvalList').innerHTML = list.map(sessionHtml).join('');
+        tickCountdowns();
+      }
+
+      function tickCountdowns() {
+        const now = Date.now();
+        document.querySelectorAll('#approvalList [data-deadline]').forEach((el) => {
+          const left = Math.max(0, (Number(el.dataset.deadline) || 0) - now);
+          el.textContent = Math.ceil(left / 1000) + ' 秒';
+        });
+      }
+      setInterval(tickCountdowns, 500);
+
+      // 卡片常驻显示，所以“现在能不能批准、为什么不能”必须写出来，否则功能藏在默认
+      // 隐藏的卡片里根本找不到（本机作为控制端时 /sessions 会一直 503，就是这种情况）。
+      function setApprovalState(text, kind) {
+        const el = $('approvalState');
+        el.textContent = text;
+        el.style.color = kind === 'bad' ? '#dc2626' : kind === 'warn' ? '#92400e' : '#4b5563';
+      }
+
+      async function pollSessions() {
+        if (!TOKEN) {
+          setApprovalState('未携带本地 API token，批准功能不可用。请用 start-client.sh 打开本页。', 'warn');
+          renderApprovals([]);
+          return;
+        }
+        let data;
+        try {
+          data = await localJson('/sessions');
+        } catch (e) {
+          pendingSince.clear();
+          if (e.status === 503) {
+            // 503 不是故障：本机没有连接管理器在听（没有会话，或会话面板窗口已退出）。
+            // 本机作为控制端时也会走到这里 —— 批准只对被控端有意义。
+            setApprovalState('本机没有会话面板在运行：当前没有对端接入，或会话面板已退出。');
+          } else if (e.status === 401) {
+            setApprovalState('本地 API 返回 401：页面 token 与本机配置不一致，重启 GateDesk 后重试。', 'bad');
+          } else {
+            setApprovalState('无法读取会话列表：' + e.message, 'bad');
+          }
+          renderApprovals([]);
+          return;
+        }
+        const list = (data && data.sessions) || [];
+        // 服务端的 60 秒从请求抵达时开始算，页面只能从「第一次看到」起算，
+        // 所以这个倒计时最多乐观一个轮询周期；真正的裁决在服务端。
+        const seen = new Set();
+        for (const s of list) {
+          seen.add(s.id);
+          if (!s.pending_control) pendingSince.delete(s.id);
+          else if (!pendingSince.has(s.id)) pendingSince.set(s.id, Date.now());
+        }
+        for (const id of [...pendingSince.keys()]) {
+          if (!seen.has(id)) pendingSince.delete(id);
+        }
+        setApprovalState(
+          list.length === 0 ? '当前没有对端请求接入或控制。' : '以下对端需要您处理：'
+        );
+        renderApprovals(list);
+      }
+
+      function note(text, bad) {
+        const el = $('approvalNote');
+        el.textContent = text || '';
+        el.style.color = bad ? '#dc2626' : '#166534';
+        if (noteTimer) clearTimeout(noteTimer);
+        if (text) noteTimer = setTimeout(() => { el.textContent = ''; }, 4000);
+      }
+
+      // §6.7 的动作都是幂等的：409 说明状态已经变了（放行已放行的、应答已被超时拒绝的
+      // 控制请求），504 说明连接管理器没在 2 秒内回话。这两种情况重新拉一次 /sessions 就够，
+      // 不必拿错误去惊动用户。
+      async function sessionAction(path, body, okText) {
+        try {
+          await localJson(path, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(body),
+          });
+          note(okText);
+        } catch (e) {
+          if (e.status === 409 || e.status === 404 || e.status === 504) {
+            note('状态已变化，已刷新', true);
+          } else if (e.status === 503) {
+            note('本机没有会话面板在运行，无法代为批准', true);
+          } else {
+            note('操作失败：' + e.message, true);
+          }
+        }
+        await pollSessions();
+      }
+
+      function onApprovalClick(event) {
+        const el = event.target.closest('button[data-act]');
+        if (!el) return;
+        const id = Number(el.dataset.id);
+        const accept = el.dataset.accept === 'true';
+        switch (el.dataset.act) {
+          case 'approve':
+            sessionAction('/approve', { id, accept }, accept ? '已放行接入' : '已拒绝接入');
+            break;
+          case 'control':
+            // 与桌面端面板一致：允许控制只应答控制请求，不动权限开关（两者是独立闸门）。
+            sessionAction('/control', { id, accept }, accept ? '已允许控制' : '已拒绝控制');
+            break;
+          case 'terminate':
+            if (confirm('结束该会话？对端会收到通知，之后可以重新连接。')) {
+              sessionAction('/terminate', { id }, '已结束该会话');
+            }
+            break;
+          case 'dismiss':
+            sessionAction('/dismiss', { id }, '已清理');
+            break;
+        }
+      }
+
+      function onApprovalChange(event) {
+        const el = event.target;
+        if (!el || el.dataset.act !== 'permission') return;
+        const found = PERMISSIONS.find((p) => p.name === el.dataset.name);
+        const label = (found && found.label) || el.dataset.name;
+        sessionAction(
+          '/permission',
+          { id: Number(el.dataset.id), name: el.dataset.name, enabled: el.checked },
+          label + (el.checked ? '已打开' : '已关闭')
+        );
+      }
+
       async function init() {
         if (!TOKEN) $('tokenWarn').hidden = false;
         try {
@@ -336,6 +612,11 @@
         }
         // 定时：刷新本机在线状态 + 向服务端报心跳（维持设备在线/离线判定）。
         setInterval(refreshStatus, 5000);
+        // 轮询本机会话：/sessions 没有推送通道，必须主动查（§8.1 也要求间隔远小于 60 秒）。
+        if (TOKEN) {
+          pollSessions();
+          setInterval(pollSessions, SESSIONS_POLL_MS);
+        }
       }
 
       $('retryBtn').addEventListener('click', init);
@@ -344,8 +625,13 @@
       $('endBtn').addEventListener('click', endHelp);
       $('chatSend').addEventListener('click', sendChat);
       $('chatInput').addEventListener('keydown', (e) => { if (e.key === 'Enter') sendChat(); });
+      $('approvalList').addEventListener('click', onApprovalClick);
+      $('approvalList').addEventListener('change', onApprovalChange);
 
       init();
     </script>
   </body>
 </html>
+
+
+

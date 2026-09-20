@@ -261,20 +261,40 @@ app.post('/api/audit/clear', (req, res) => {
 // ── 本机 GateDesk 本地 API 代理（admin 运维页用）────────────────────────────
 // admin 页把本机 token 随请求带来（?token=），服务端校验其与自身 API_TOKEN（env 注入）
 // 一致才代发到 127.0.0.1:21120——别人拿不到 token 则 401，代理不再是无鉴权开口。
+// 用内置 http 模块而不是 fetch：全局 fetch 要 Node 18+，而本机 `node` 可能是 12
+// （实测 /usr/local/bin/node v12.18.2），那时 fetch 未定义，代理会把每个请求都变成
+// 502「本机 GateDesk 不可达」—— admin 页的本机功能（/id、/status、/connect、§6.7）一起失效。
+function localApiRequest(sub, method, body) {
+  return new Promise((resolve, reject) => {
+    const headers = { Authorization: `Bearer ${API_TOKEN}`, 'Content-Type': 'application/json' };
+    if (body) headers['Content-Length'] = Buffer.byteLength(body);
+    const req = http.request(
+      { host: '127.0.0.1', port: 21120, path: sub, method, headers },
+      (res) => {
+        let raw = '';
+        res.setEncoding('utf8');
+        res.on('data', (chunk) => { raw += chunk; });
+        res.on('end', () => resolve({ status: res.statusCode || 502, raw }));
+      }
+    );
+    req.on('error', reject);
+    // 会话类接口自身有 2 秒上界（§6.7），这里给足余量再放弃，避免请求悬挂。
+    req.setTimeout(10000, () => req.destroy(new Error('本机 GateDesk 响应超时')));
+    req.end(body);
+  });
+}
+
 app.all('/api/local/*', async (req, res) => {
   const provided = new URL(req.url, 'http://x').searchParams.get('token') || '';
   if (!API_TOKEN || provided !== API_TOKEN) {
     return res.status(401).json({ ok: false, error: 'token 无效' });
   }
   const sub = req.originalUrl.replace(/^\/api\/local/, ''); // 含原 ?token=，21120 亦按此校验
+  const body = ['GET', 'HEAD'].includes(req.method) ? undefined : JSON.stringify(req.body || {});
   try {
-    const r = await fetch('http://127.0.0.1:21120' + sub, {
-      method: req.method,
-      headers: { Authorization: `Bearer ${API_TOKEN}`, 'Content-Type': 'application/json' },
-      body: ['GET', 'HEAD'].includes(req.method) ? undefined : JSON.stringify(req.body || {}),
-    });
-    const ct = (r.headers.get('content-type') || '').toLowerCase();
-    const data = ct.includes('application/json') ? await r.json() : await r.text();
+    const r = await localApiRequest(sub, req.method, body);
+    let data;
+    try { data = JSON.parse(r.raw); } catch { data = r.raw; }
     res.status(r.status).json(data);
   } catch (e) {
     res.status(502).json({ ok: false, error: '本机 GateDesk 不可达: ' + e.message });
@@ -340,5 +360,6 @@ server.listen(PORT, () => {
   console.log(`Operator page:  http://localhost:${PORT}/admin`);
   console.log(`Audit console:  http://localhost:${PORT}/audit`);
 });
+
 
 
