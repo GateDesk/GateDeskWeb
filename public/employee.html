@@ -100,17 +100,8 @@
         首次远程协助请在系统设置中给 GateDesk 授予 <b>屏幕录制</b> 与 <b>麦克风</b> 权限，否则运维人员无法看到您的画面。
       </div>
 
-      <!-- 运维页在运维端点的 A 类开关，落到这里要客户自己点头。放在最上面是因为「没反应」
-           最容易被当成没发生：这条不出现在眼前，就等于把决定权悄悄交给了远处那个人。 -->
-      <div id="permAskCard" class="card" hidden style="border:1px solid #fde68a;background:#fffbeb">
-        <h3>运维请求变更权限</h3>
-        <div class="kv" id="permAskText"></div>
-        <div class="row" style="margin-top:8px">
-          <button class="btn-allow" id="permAskAllow">允许</button>
-          <button class="btn-deny" id="permAskDeny">拒绝</button>
-        </div>
-        <div class="kv" id="permAskNote" style="margin-top:6px"></div>
-      </div>
+      <!-- 运维端请求开 A 类权限的落点是客户本机的 GateDesk 面板，不在这个网页上：请求经
+           会话走 OptionMessage 发给客户机的 GateDesk，由它在本地弹确认。这个页面不再中转。 -->
 
       <div id="setup" class="card">
         <h3>本机设备</h3>
@@ -231,15 +222,23 @@
         $('endBtn').disabled = state === 'online';
       }
 
+      // 服务端是内存态，重启一次就把在途的连接全掉。所以这条通道断了得自己接回来：不接，
+      // 聊天就不通了，而且两边都看不出为什么。
+      let chatRetry = null;
+
       function connectChat() {
+        if (chatRetry) { clearTimeout(chatRetry); chatRetry = null; }
         const proto = location.protocol === 'https:' ? 'wss://' : 'ws://';
-        ws = new WebSocket(`${proto}${location.host}/ws?deviceId=${deviceId}&role=user`);
-        ws.onopen = () => {
+        const sock = new WebSocket(`${proto}${location.host}/ws?deviceId=${deviceId}&role=user`);
+        ws = sock;
+        sock.onopen = () => {
+          if (ws !== sock) return;
           $('chatPanel').hidden = false;
           $('chatInput').disabled = false;
           $('chatSend').disabled = false;
         };
-        ws.onmessage = (event) => {
+        sock.onmessage = (event) => {
+          if (ws !== sock) return;
           const data = JSON.parse(event.data);
           if (data.type === 'history') {
             $('chatMsgs').innerHTML = '';
@@ -253,12 +252,13 @@
           } else if (data.type === 'control-ended' || data.type === 'peer-ended') {
             if (data.type === 'peer-ended') alert('对方已结束协助。');
             renderState('online');
-          } else if (data.type === 'permission-set') {
-            // 运维页在它那台机器上点的 A 类开关，经服务端转到这里。先不执行：摆到客户眼前。
-            enqueuePermissionAsk(data.name, data.enabled);
           }
         };
-        ws.onclose = () => { ws = null; };
+        sock.onclose = () => {
+          if (ws !== sock) return;
+          ws = null;
+          if (deviceId) chatRetry = setTimeout(connectChat, 2000);
+        };
       }
 
       function sendChat() {
@@ -328,6 +328,8 @@
       }
 
       // 向服务端上报：页面存活（本次调用本身）+ 本机 GateDesk 的 /status 快照。
+      // 404 说明服务端上已经没有这台设备了（它是内存态，重启一次就清空），这时要重新上报
+      // 一次注册。页面还开着却因为服务端重启而永远上不了线，是最难查的一种「没反应」。
       function sendHeartbeat(st) {
         if (!deviceId) return;
         fetch(ENDPOINT + '/api/device/heartbeat', {
@@ -338,7 +340,20 @@
             assistable: !!(st && st.assistable),
             inSession: !!(st && st.in_session),
           }),
-        }).catch(() => {});
+        })
+          .then((res) => (res.status === 404 ? reRegister() : null))
+          .catch(() => {});
+      }
+
+      // 重新上报本机 ID 与密码（幂等）。故意不碰 WS：连接可能还活着，在这里重连会多开一条，
+      // 服务端会把同一个权限请求投两遍，客户就会看到两次确认。
+      async function reRegister() {
+        try {
+          await fetch(ENDPOINT + '/api/device/register', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ id: deviceId, password: currentPassword }),
+          });
+        } catch (e) { /* 下次心跳再试 */ }
       }
 
       async function requestHelp() {
@@ -507,102 +522,6 @@
         el.style.color = kind === 'bad' ? '#dc2626' : kind === 'warn' ? '#92400e' : '#4b5563';
       }
 
-      // 运维页那四个开关的落点必须在客户机：只有本机的 127.0.0.1:21120 能改本机 GateDesk
-      // 的权限，服务端和运维端都够不着。但转发过来的意向也不直接执行——先摆到客户眼前让
-      // 他点，这一侧才是「本机用户允许」的落点，远处那个人代替不了。
-      let permsSig = '';
-
-      function desktopSession(list) {
-        return (list || []).find((s) => !s.disconnected && isDesktopSession(s)) || null;
-      }
-
-      const PERM_LABELS = { keyboard: '键鼠', clipboard: '剪贴板', audio: '声音', file: '文件传输' };
-
-      // 执行一次变更，成功返回 true。不在这里说话，说法交给点下这一下的那一侧。
-      async function applyPermission(name, enabled) {
-        if (!TOKEN) {
-          note('未携带本地 API token，无法设置权限', true);
-          return false;
-        }
-        let id = null;
-        try {
-          const data = await localJson('/sessions');
-          const s = desktopSession((data && data.sessions) || []);
-          if (s) id = s.id;
-        } catch (e) { /* 没有会话时在下面统一报 */ }
-        if (id === null) {
-          note('本机没有进行中的桌面会话，无法设置权限', true);
-          return false;
-        }
-        try {
-          await localJson('/permission', {
-            method: 'POST',
-            body: JSON.stringify({ id, name, enabled }),
-          });
-        } catch (e) {
-          note('设置权限失败：' + e.message, true);
-          return false;
-        }
-        await pollSessions();
-        return true;
-      }
-
-      // 等客户点头的请求。排队而不是后来居上：每一次变更都得有个结论回给运维页。
-      const permissionAsks = [];
-
-      function enqueuePermissionAsk(name, enabled) {
-        permissionAsks.push({ name, enabled });
-        renderPermissionAsk();
-      }
-
-      function renderPermissionAsk() {
-        const ask = permissionAsks[0];
-        $('permAskCard').hidden = !ask;
-        if (!ask) {
-          $('permAskText').textContent = '';
-          return;
-        }
-        $('permAskText').textContent =
-          '运维人员请求' + (ask.enabled ? '打开' : '关闭') + '「' +
-          (PERM_LABELS[ask.name] || ask.name) + '」，是否允许？';
-      }
-
-      // 客户点的那一下：执行（或拒绝），然后把结论回给运维页——它那边只能靠这条知道结果。
-      async function answerPermissionAsk(accepted) {
-        const ask = permissionAsks.shift();
-        renderPermissionAsk();
-        if (!ask) return;
-        let ok = false;
-        if (accepted) {
-          $('permAskNote').textContent = '正在应用…';
-          ok = await applyPermission(ask.name, ask.enabled);
-          $('permAskNote').textContent = '';
-        }
-        if (ws && ws.readyState === 1) {
-          ws.send(JSON.stringify({
-            type: 'permission-result',
-            name: ask.name,
-            enabled: ask.enabled,
-            accepted: accepted && ok,
-          }));
-        }
-      }
-
-      // 四项的实际值只能从本机读出来，所以由这一侧回报。值没变就不发，免得每 2 秒一次的
-      // 轮询把同一条状态反复刷成服务端广播。
-      function reportPermissions(list) {
-        const s = desktopSession(list);
-        if (!s) return;
-        const cur = {};
-        PERMISSIONS.forEach((p) => { cur[p.name] = !!s[p.name]; });
-        const sig = JSON.stringify(cur);
-        if (sig === permsSig) return;
-        permsSig = sig;
-        if (ws && ws.readyState === 1) {
-          ws.send(JSON.stringify({ type: 'permission-state', permissions: cur }));
-        }
-      }
-
       async function pollSessions() {
         if (!TOKEN) {
           setApprovalState('未携带本地 API token，批准功能不可用。请用 start-client.sh 打开本页。', 'warn');
@@ -642,7 +561,6 @@
           list.length === 0 ? '当前没有对端请求接入或控制。' : '以下对端需要您处理：'
         );
         renderApprovals(list);
-        reportPermissions(list);
       }
 
       function note(text, bad) {
@@ -739,8 +657,6 @@
       $('chatInput').addEventListener('keydown', (e) => { if (e.key === 'Enter') sendChat(); });
       $('approvalList').addEventListener('click', onApprovalClick);
       $('approvalList').addEventListener('change', onApprovalChange);
-      $('permAskAllow').addEventListener('click', () => answerPermissionAsk(true));
-      $('permAskDeny').addEventListener('click', () => answerPermissionAsk(false));
 
       init();
     </script>

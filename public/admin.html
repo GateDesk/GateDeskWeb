@@ -147,19 +147,21 @@
         </div>
         <p class="muted" id="ctrlHint" style="margin:10px 0 0;font-size:13px"></p>
 
-        <!-- A 类四项：会静默外泄数据的通道，客户机上默认关。这里点一下是经服务端转给
-             该设备的 employee 页执行——本地 API 只绑回环，运维机直接调不到客户的 GateDesk。
-             勾选状态以服务端广播的 permissions 为准，不是本地点了就当真。 -->
+        <!-- A 类四项：会静默外泄数据的通道，客户机上默认关。这里点一下是向客户机的
+             GateDesk 发一个「请求开启」——和「请求控制客户端鼠标键盘」走的是同一条路
+             （本机本地 API 的 /request-permission），最终由客户在他自己那台机器的
+             GateDesk 上点「允许」。所以这里没有勾选框：这不是本机的一个状态，读不到，
+             画一个勾就是在骗人。 -->
         <div class="actions" id="permRow" style="margin-top:12px">
-          <span class="muted" style="font-size:13px">A 类权限：</span>
-          <label class="perm"><input type="checkbox" data-perm="keyboard"> 键鼠</label>
-          <label class="perm"><input type="checkbox" data-perm="clipboard"> 剪贴板</label>
-          <label class="perm"><input type="checkbox" data-perm="audio"> 声音</label>
-          <label class="perm"><input type="checkbox" data-perm="file"> 文件传输</label>
+          <span class="muted" style="font-size:13px">请求客户机开启：</span>
+          <button class="btn-small btn-allow" data-perm-req="keyboard" disabled>键鼠</button>
+          <button class="btn-small btn-allow" data-perm-req="clipboard" disabled>剪贴板</button>
+          <button class="btn-small btn-allow" data-perm-req="audio" disabled>声音</button>
+          <button class="btn-small btn-allow" data-perm-req="file" disabled>文件传输</button>
         </div>
 
         <div class="chat" id="chatPanel" hidden>
-          <div class="chat-head">与客户聊天</div>
+          <div class="chat-head">与客户聊天<span id="chanStatus" class="muted" style="font-weight:400;font-size:12px;margin-left:8px"></span></div>
           <div class="chat-msgs" id="chatMsgs"></div>
           <div class="chat-input-row">
             <input id="chatInput" placeholder="输入消息，按回车发送" disabled />
@@ -314,20 +316,36 @@
         }
         $('controlBtn').disabled = state !== 'requested';
         $('localOffBtn').disabled = state !== 'assisting';
-        // Asking a peer for control only makes sense while we are actually in a session
+        // Asking a peer to do anything only makes sense while we are actually in a session
         // with it; outside one there is no connection to ask on.
         $('requestCtrlBtn').disabled = state !== 'assisting';
+        document.querySelectorAll('#permRow button[data-perm-req]').forEach((el) => {
+          el.disabled = state !== 'assisting';
+        });
       }
 
+      // 实时通道：聊天靠它，会话状态靠它。所以它断了不能只是静默地把 ws
+      // 置空——那就变成「点一下说尚未连接」，看不出为什么。这里记下断开原因、写在页面上，
+      // 并按秒重连：服务端的设备记录是内存态，一次重启就会把在途的连接全掐了。
+      let chatClosed = '';
+      let chatRetry = null;
+
       function connectChat() {
+        if (chatRetry) { clearTimeout(chatRetry); chatRetry = null; }
         const proto = location.protocol === 'https:' ? 'wss://' : 'ws://';
-        ws = new WebSocket(`${proto}${location.host}/ws?deviceId=${activeDevice.id}&role=${role}`);
-        ws.onopen = () => {
+        const sock = new WebSocket(`${proto}${location.host}/ws?deviceId=${activeDevice.id}&role=${role}`);
+        ws = sock;
+        sock.onopen = () => {
+          if (ws !== sock) return;
+          chatClosed = '';
+          $('chanStatus').textContent = '';
           $('chatPanel').hidden = false;
           $('chatInput').disabled = false;
           $('chatSend').disabled = false;
         };
-        ws.onmessage = (event) => {
+        sock.onmessage = (event) => {
+          // 换设备时旧 socket 的消息还会晚一步到，不能让它写进新设备的界面。
+          if (ws !== sock) return;
           const data = JSON.parse(event.data);
           if (data.type === 'history') {
             $('chatMsgs').innerHTML = '';
@@ -336,9 +354,6 @@
             appendMessage(data.message);
           } else if (data.type === 'session-state') {
             setState(data.state);
-            setPermRow(data.permissions);
-          } else if (data.type === 'permission-result') {
-            showPermissionResult(data);
           } else if (data.type === 'control-started') {
             setState('assisting');
           } else if (data.type === 'control-ended' || data.type === 'peer-ended') {
@@ -349,8 +364,24 @@
             setState('online');
           }
         };
-        ws.onclose = () => { ws = null; };
+        sock.onclose = (event) => {
+          // 只有「当前这条」断了才算断：换设备时会先 close 旧的，它的 onclose 是晚一步到的，
+          // 少了这道判断就会把新连接一并置空，再顺手多连一条。
+          if (ws !== sock) return;
+          ws = null;
+          chatClosed = event.code
+            ? `已断开（${event.code}${event.reason ? ' ' + event.reason : ''}）`
+            : '已断开';
+          // 还在这个设备的协助页里就自己接回来，否则一次服务端重启会让整页失效到刷新为止。
+          if (activeDevice) {
+            $('chanStatus').textContent = '实时通道' + chatClosed + '，重连中…';
+            chatRetry = setTimeout(() => { if (activeDevice) connectChat(); }, 2000);
+          }
+        };
       }
+
+      // 点下游开关时通道可能正在重连，或刚断。等它连上再发——「还没连上」不是「你点错了」，
+      // 不该拿一句「尚未连接」把原因藏起来。
 
       function sendChat() {
         const text = $('chatInput').value.trim();
@@ -364,8 +395,6 @@
         if (!deviceId) return;
         if (ws) { ws.close(); ws = null; }
         activeDevice = { id: deviceId };
-        // 换设备时先把四项清空：上一位客户的权限不能留在这一位的复选框里。
-        setPermRow({});
         $('listCard').hidden = true;
         $('activeCard').hidden = false;
         $('deviceIdText').textContent = deviceId;
@@ -466,47 +495,27 @@
         }
       }
 
-      // A 类四项由客户机执行：本服务够不着客户的 127.0.0.1，运维页更够不着，所以这里只把
-      // 意图经 WS 转给那台设备的 employee 页。而且它只是「问」：客户在那边点完，结果会以
-      // permission-result 回来。复选框不本地翻转，等回报或服务端广播的 permissions 再画，
-      // 否则客户机没开着、或客户拒绝了，界面就在骗人。
+      // 向对端要 A 类四项之一（GateDesk-api.md §6.10 POST /request-permission）。和
+      // 「请求控制」一样只走本机本地 API：本机 GateDesk 的会话进程把请求当 OptionMessage
+      // 发给对端，对端会弹自己的确认界面，客户不点就什么也不会变。所以这里没有勾选框——
+      // 这是「问」，不是本机的一个状态；勾在谁名下、客户答了什么，只有客户那台机器知道。
       const PERM_LABELS = { keyboard: '键鼠', clipboard: '剪贴板', audio: '声音', file: '文件传输' };
-      let lastPerms = {};
 
-      function sendPermission(name, enabled) {
-        if (!ws || ws.readyState !== 1) {
-          alert('尚未连接到服务端，无法下发权限。');
-          setPermRow(lastPerms);
-          return;
-        }
-        ws.send(JSON.stringify({ type: 'permission-set', name, enabled }));
-        $('ctrlHint').textContent =
-          '已请求客户机' + (enabled ? '打开' : '关闭') + '「' + (PERM_LABELS[name] || name) +
-          '」，正在等客户在客户机上确认。';
-        // 先把勾拉回服务端已知的状态：这次点到底成没成，要等客户回答，
-        // 眼下不能给一个他还没点头的勾。
-        setPermRow(lastPerms);
-      }
-
-      // 客户机的答复——「客户点没点、点的是允许还是拒绝」只有这条能说清。
-      function showPermissionResult(data) {
-        const label = PERM_LABELS[data.name] || data.name;
-        if (data.accepted) {
+      async function requestPermission(name) {
+        const id = activeDevice && activeDevice.id;
+        if (!id) return;
+        const label = PERM_LABELS[name] || name;
+        try {
+          await localJson('/request-permission', {
+            method: 'POST',
+            body: JSON.stringify({ id, name }),
+          });
           $('ctrlHint').textContent =
-            '客户已允许' + (data.enabled ? '打开' : '关闭') + '「' + label + '」。';
-        } else if (data.reason) {
-          $('ctrlHint').textContent = '未能变更「' + label + '」：' + data.reason + '。';
-        } else {
-          $('ctrlHint').textContent = '客户拒绝了「' + label + '」的变更。';
+            '已向 ' + id + ' 请求开启「' + label + '」。请在客户机的 GateDesk 上点「允许」，' +
+            '60 秒内无应答按拒绝处理。';
+        } catch (e) {
+          alert('请求开启「' + label + '」失败：' + e.message);
         }
-      }
-
-      function setPermRow(perms) {
-        if (!perms) return;
-        lastPerms = perms;
-        document.querySelectorAll('#permRow input[data-perm]').forEach((el) => {
-          el.checked = !!perms[el.dataset.perm];
-        });
       }
 
       async function toggleVoice() {
@@ -551,8 +560,8 @@
       $('chatInput').addEventListener('keydown', (e) => { if (e.key === 'Enter') sendChat(); });
       $('approvalList').addEventListener('click', onApprovalClick);
       $('approvalList').addEventListener('change', onApprovalChange);
-      document.querySelectorAll('#permRow input[data-perm]').forEach((el) => {
-        el.addEventListener('change', () => sendPermission(el.dataset.perm, el.checked));
+      document.querySelectorAll('#permRow button[data-perm-req]').forEach((el) => {
+        el.addEventListener('click', () => requestPermission(el.dataset.permReq));
       });
       document.querySelectorAll('input[name=role]').forEach((r) => {
         r.addEventListener('change', async () => {
