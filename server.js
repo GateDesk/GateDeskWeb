@@ -70,20 +70,41 @@ function broadcastState(device) {
 }
 
 // 运维页点了 A 类四个开关之一：只收白名单里的名字和真正的布尔值，然后转给这台设备的客户页。
-// 客户页才是执行方——它调的是自己那台机器的 127.0.0.1:21120，本服务够不着，运维页更够不着。
+// 这里只转意图，不写 device.permissions——那四项的当前值以客户页上报的实况为准（见
+// onPermissionState），把「还没答应的请求」当成状态存下来，刷新后就会画出一个假勾。
 function onPermissionSet(device, ws, msg) {
   if (ws.role !== 'operator') return;
   const name = String(msg.name || '');
   if (!PERMISSION_NAMES.includes(name)) return;
   if (typeof msg.enabled !== 'boolean') return;
-  device.permissions = { ...(device.permissions || {}), [name]: msg.enabled };
+  const enabled = msg.enabled;
   const room = wsRooms.get(device.id);
-  if (room) {
-    for (const s of room) {
-      if (s.readyState === 1 && s.role === 'user') {
-        sendJson(s, { type: 'permission-set', deviceId: device.id, name, enabled: msg.enabled });
-      }
-    }
+  const users = room
+    ? [...room].filter((s) => s.readyState === 1 && s.role === 'user')
+    : [];
+  // 客户页是执行方，也是唯一能说「允许」的一方。它没开着就当场说回去，免得运维页在那儿
+  // 等一个永远不会来的回报——「没反应」是最难查的一种失败。
+  if (users.length === 0) {
+    sendJson(ws, {
+      type: 'permission-result',
+      deviceId: device.id,
+      name,
+      enabled,
+      accepted: false,
+      reason: '客户机没有打开协助页面',
+    });
+    audit({
+      action: 'permission.change',
+      actor: 'operator',
+      device_id: device.id,
+      session_id: device.sessionId,
+      result: 'no-client',
+      extra: { name, enabled },
+    });
+    return;
+  }
+  for (const s of users) {
+    sendJson(s, { type: 'permission-set', deviceId: device.id, name, enabled });
   }
   audit({
     action: 'permission.change',
@@ -91,7 +112,33 @@ function onPermissionSet(device, ws, msg) {
     device_id: device.id,
     session_id: device.sessionId,
     result: 'requested',
-    extra: { name, enabled: msg.enabled },
+    extra: { name, enabled },
+  });
+}
+
+// 客户在客户机上点的结果：转回给这台设备的运维页，并记一条。至此一次变更才有结论——
+// 转过去只是「问过了」。
+function onPermissionResult(device, ws, msg) {
+  if (ws.role !== 'user') return;
+  const name = String(msg.name || '');
+  if (!PERMISSION_NAMES.includes(name)) return;
+  const enabled = !!msg.enabled;
+  const accepted = !!msg.accepted;
+  const room = wsRooms.get(device.id);
+  if (room) {
+    for (const s of room) {
+      if (s.readyState === 1 && s.role === 'operator') {
+        sendJson(s, { type: 'permission-result', deviceId: device.id, name, enabled, accepted });
+      }
+    }
+  }
+  audit({
+    action: 'permission.change',
+    actor: 'customer',
+    device_id: device.id,
+    session_id: device.sessionId,
+    result: accepted ? 'ok' : 'denied',
+    extra: { name, enabled },
   });
 }
 
@@ -387,8 +434,9 @@ wss.on('connection', (ws, req) => {
     let msg;
     try { msg = JSON.parse(raw); } catch { return; }
     if (!msg) return;
-    // 运维页的 A 类开关，以及客户页回报的四项实况，都不进聊天流，各自处理完就结束。
+    // 运维页的 A 类开关、客户页的答复与四项实况，都不进聊天流，各自处理完就结束。
     if (msg.type === 'permission-set') return onPermissionSet(device, ws, msg);
+    if (msg.type === 'permission-result') return onPermissionResult(device, ws, msg);
     if (msg.type === 'permission-state') return onPermissionState(device, ws, msg);
     if (msg.type !== 'chat') return;
     const text = String(msg.text || '').trim().slice(0, 1000);

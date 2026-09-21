@@ -100,6 +100,18 @@
         首次远程协助请在系统设置中给 GateDesk 授予 <b>屏幕录制</b> 与 <b>麦克风</b> 权限，否则运维人员无法看到您的画面。
       </div>
 
+      <!-- 运维页在运维端点的 A 类开关，落到这里要客户自己点头。放在最上面是因为「没反应」
+           最容易被当成没发生：这条不出现在眼前，就等于把决定权悄悄交给了远处那个人。 -->
+      <div id="permAskCard" class="card" hidden style="border:1px solid #fde68a;background:#fffbeb">
+        <h3>运维请求变更权限</h3>
+        <div class="kv" id="permAskText"></div>
+        <div class="row" style="margin-top:8px">
+          <button class="btn-allow" id="permAskAllow">允许</button>
+          <button class="btn-deny" id="permAskDeny">拒绝</button>
+        </div>
+        <div class="kv" id="permAskNote" style="margin-top:6px"></div>
+      </div>
+
       <div id="setup" class="card">
         <h3>本机设备</h3>
         <div class="kv" id="deviceLine">正在读取本机 GateDesk ID…</div>
@@ -242,8 +254,8 @@
             if (data.type === 'peer-ended') alert('对方已结束协助。');
             renderState('online');
           } else if (data.type === 'permission-set') {
-            // 运维页在它那台机器上点的 A 类开关，经服务端转到这里执行。
-            applyPermission(data.name, data.enabled);
+            // 运维页在它那台机器上点的 A 类开关，经服务端转到这里。先不执行：摆到客户眼前。
+            enqueuePermissionAsk(data.name, data.enabled);
           }
         };
         ws.onclose = () => { ws = null; };
@@ -496,18 +508,21 @@
       }
 
       // 运维页那四个开关的落点必须在客户机：只有本机的 127.0.0.1:21120 能改本机 GateDesk
-      // 的权限，服务端和运维端都够不着。所以转发过来的意向在这里就地执行，执行完顺手把四项
-      // 实况回报给服务端，好让运维页画出来的勾选是真值，而不是它自己点的那一下。
+      // 的权限，服务端和运维端都够不着。但转发过来的意向也不直接执行——先摆到客户眼前让
+      // 他点，这一侧才是「本机用户允许」的落点，远处那个人代替不了。
       let permsSig = '';
 
       function desktopSession(list) {
         return (list || []).find((s) => !s.disconnected && isDesktopSession(s)) || null;
       }
 
+      const PERM_LABELS = { keyboard: '键鼠', clipboard: '剪贴板', audio: '声音', file: '文件传输' };
+
+      // 执行一次变更，成功返回 true。不在这里说话，说法交给点下这一下的那一侧。
       async function applyPermission(name, enabled) {
         if (!TOKEN) {
           note('未携带本地 API token，无法设置权限', true);
-          return;
+          return false;
         }
         let id = null;
         try {
@@ -517,18 +532,60 @@
         } catch (e) { /* 没有会话时在下面统一报 */ }
         if (id === null) {
           note('本机没有进行中的桌面会话，无法设置权限', true);
-          return;
+          return false;
         }
         try {
           await localJson('/permission', {
             method: 'POST',
             body: JSON.stringify({ id, name, enabled }),
           });
-          note('运维已' + (enabled ? '打开' : '关闭') + ' ' + name);
         } catch (e) {
           note('设置权限失败：' + e.message, true);
+          return false;
         }
         await pollSessions();
+        return true;
+      }
+
+      // 等客户点头的请求。排队而不是后来居上：每一次变更都得有个结论回给运维页。
+      const permissionAsks = [];
+
+      function enqueuePermissionAsk(name, enabled) {
+        permissionAsks.push({ name, enabled });
+        renderPermissionAsk();
+      }
+
+      function renderPermissionAsk() {
+        const ask = permissionAsks[0];
+        $('permAskCard').hidden = !ask;
+        if (!ask) {
+          $('permAskText').textContent = '';
+          return;
+        }
+        $('permAskText').textContent =
+          '运维人员请求' + (ask.enabled ? '打开' : '关闭') + '「' +
+          (PERM_LABELS[ask.name] || ask.name) + '」，是否允许？';
+      }
+
+      // 客户点的那一下：执行（或拒绝），然后把结论回给运维页——它那边只能靠这条知道结果。
+      async function answerPermissionAsk(accepted) {
+        const ask = permissionAsks.shift();
+        renderPermissionAsk();
+        if (!ask) return;
+        let ok = false;
+        if (accepted) {
+          $('permAskNote').textContent = '正在应用…';
+          ok = await applyPermission(ask.name, ask.enabled);
+          $('permAskNote').textContent = '';
+        }
+        if (ws && ws.readyState === 1) {
+          ws.send(JSON.stringify({
+            type: 'permission-result',
+            name: ask.name,
+            enabled: ask.enabled,
+            accepted: accepted && ok,
+          }));
+        }
       }
 
       // 四项的实际值只能从本机读出来，所以由这一侧回报。值没变就不发，免得每 2 秒一次的
@@ -682,6 +739,8 @@
       $('chatInput').addEventListener('keydown', (e) => { if (e.key === 'Enter') sendChat(); });
       $('approvalList').addEventListener('click', onApprovalClick);
       $('approvalList').addEventListener('change', onApprovalChange);
+      $('permAskAllow').addEventListener('click', () => answerPermissionAsk(true));
+      $('permAskDeny').addEventListener('click', () => answerPermissionAsk(false));
 
       init();
     </script>

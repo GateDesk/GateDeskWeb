@@ -337,6 +337,8 @@
           } else if (data.type === 'session-state') {
             setState(data.state);
             setPermRow(data.permissions);
+          } else if (data.type === 'permission-result') {
+            showPermissionResult(data);
           } else if (data.type === 'control-started') {
             setState('assisting');
           } else if (data.type === 'control-ended' || data.type === 'peer-ended') {
@@ -465,8 +467,10 @@
       }
 
       // A 类四项由客户机执行：本服务够不着客户的 127.0.0.1，运维页更够不着，所以这里只把
-      // 意图经 WS 转给那台设备的 employee 页，由它调自己的本地 API。复选框不本地翻转，等
-      // 服务端广播 permissions 回来再画——否则客户机没开着、或本地 API 拒绝时，界面就在骗人。
+      // 意图经 WS 转给那台设备的 employee 页。而且它只是「问」：客户在那边点完，结果会以
+      // permission-result 回来。复选框不本地翻转，等回报或服务端广播的 permissions 再画，
+      // 否则客户机没开着、或客户拒绝了，界面就在骗人。
+      const PERM_LABELS = { keyboard: '键鼠', clipboard: '剪贴板', audio: '声音', file: '文件传输' };
       let lastPerms = {};
 
       function sendPermission(name, enabled) {
@@ -477,10 +481,24 @@
         }
         ws.send(JSON.stringify({ type: 'permission-set', name, enabled }));
         $('ctrlHint').textContent =
-          '已请求客户机' + (enabled ? '打开' : '关闭') + ' ' + name + '，等它回报结果。';
-        // 先把勾拉回服务端已知的状态：这次点到底成没成，要等客户机回报，
-        // 眼下不能给一个它没确认过的勾。
+          '已请求客户机' + (enabled ? '打开' : '关闭') + '「' + (PERM_LABELS[name] || name) +
+          '」，正在等客户在客户机上确认。';
+        // 先把勾拉回服务端已知的状态：这次点到底成没成，要等客户回答，
+        // 眼下不能给一个他还没点头的勾。
         setPermRow(lastPerms);
+      }
+
+      // 客户机的答复——「客户点没点、点的是允许还是拒绝」只有这条能说清。
+      function showPermissionResult(data) {
+        const label = PERM_LABELS[data.name] || data.name;
+        if (data.accepted) {
+          $('ctrlHint').textContent =
+            '客户已允许' + (data.enabled ? '打开' : '关闭') + '「' + label + '」。';
+        } else if (data.reason) {
+          $('ctrlHint').textContent = '未能变更「' + label + '」：' + data.reason + '。';
+        } else {
+          $('ctrlHint').textContent = '客户拒绝了「' + label + '」的变更。';
+        }
       }
 
       function setPermRow(perms) {
