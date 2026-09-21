@@ -30,8 +30,14 @@ app.use(express.static(path.join(__dirname, 'public')));
 //   assisting ──(request/end 任一端结束)──▶ online
 // 状态只由服务端转换，客户端仅提交意图。
 // ---------------------------------------------------------------------------
-const devices = new Map(); // deviceId -> { id, password, state, lastSeen, messages[] }
+const devices = new Map(); // deviceId -> { id, password, state, lastSeen, messages[], permissions }
 const wsRooms = new Map(); // deviceId -> Set<ws>
+
+// A 类四项：会静默外泄数据的通道，客户端里默认关、只由本机用户按会话打开。运维页要能
+// 替客户开关它们，但运维机的 127.0.0.1 到不了客户的 GateDesk（本地 API 只绑回环），所以
+// 这四项由本服务中转：运维把意图发到这里，这里转给该设备的 employee 页，由它调自己那台
+// 机器的本地 API 执行。名字与 GateDesk 的 /permission 白名单一致，多一个都不认。
+const PERMISSION_NAMES = ['keyboard', 'clipboard', 'audio', 'file'];
 
 function getDevice(id) {
   const d = devices.get(id || '');
@@ -49,11 +55,58 @@ function broadcast(deviceId, obj) {
 }
 
 function statePayload(device) {
-  return { type: 'session-state', state: device.state, deviceId: device.id };
+  return {
+    type: 'session-state',
+    state: device.state,
+    deviceId: device.id,
+    // 四项权限的当前值，由客户页上报。运维页据此画复选框——单放一份在服务端，
+    // 免得两个页面各存一份、刷新后对不上。
+    permissions: device.permissions || {},
+  };
 }
 
 function broadcastState(device) {
   broadcast(device.id, statePayload(device));
+}
+
+// 运维页点了 A 类四个开关之一：只收白名单里的名字和真正的布尔值，然后转给这台设备的客户页。
+// 客户页才是执行方——它调的是自己那台机器的 127.0.0.1:21120，本服务够不着，运维页更够不着。
+function onPermissionSet(device, ws, msg) {
+  if (ws.role !== 'operator') return;
+  const name = String(msg.name || '');
+  if (!PERMISSION_NAMES.includes(name)) return;
+  if (typeof msg.enabled !== 'boolean') return;
+  device.permissions = { ...(device.permissions || {}), [name]: msg.enabled };
+  const room = wsRooms.get(device.id);
+  if (room) {
+    for (const s of room) {
+      if (s.readyState === 1 && s.role === 'user') {
+        sendJson(s, { type: 'permission-set', deviceId: device.id, name, enabled: msg.enabled });
+      }
+    }
+  }
+  audit({
+    action: 'permission.change',
+    actor: 'operator',
+    device_id: device.id,
+    session_id: device.sessionId,
+    result: 'requested',
+    extra: { name, enabled: msg.enabled },
+  });
+}
+
+// 客户页上报它那台机器上这四项的真实值（从本地 API 的 /sessions 读出来）。存下来是为了
+// 运维页刷新、或者晚一步打开时还能画出正确状态；广播出去是为了两侧立刻同步。
+function onPermissionState(device, ws, msg) {
+  if (ws.role !== 'user') return;
+  const incoming = msg.permissions;
+  if (!incoming || typeof incoming !== 'object') return;
+  const next = { ...(device.permissions || {}) };
+  for (const name of PERMISSION_NAMES) {
+    if (name in incoming) next[name] = !!incoming[name];
+  }
+  device.permissions = next;
+  broadcastState(device);
 }
 
 function joinRoom(deviceId, ws) {
@@ -162,7 +215,7 @@ app.post('/api/device/register', (req, res) => {
   }
   let device = devices.get(String(id));
   if (!device) {
-    device = { id: String(id), password: '', state: 'online', lastSeen: Date.now(), messages: [], sessionId: null, clientOnline: false };
+    device = { id: String(id), password: '', state: 'online', lastSeen: Date.now(), messages: [], sessionId: null, clientOnline: false, permissions: {} };
     devices.set(device.id, device);
   }
   device.password = String(password || '');
@@ -333,7 +386,11 @@ wss.on('connection', (ws, req) => {
   ws.on('message', (raw) => {
     let msg;
     try { msg = JSON.parse(raw); } catch { return; }
-    if (!msg || msg.type !== 'chat') return;
+    if (!msg) return;
+    // 运维页的 A 类开关，以及客户页回报的四项实况，都不进聊天流，各自处理完就结束。
+    if (msg.type === 'permission-set') return onPermissionSet(device, ws, msg);
+    if (msg.type === 'permission-state') return onPermissionState(device, ws, msg);
+    if (msg.type !== 'chat') return;
     const text = String(msg.text || '').trim().slice(0, 1000);
     if (!text) return;
     const isOperator = role === 'operator';

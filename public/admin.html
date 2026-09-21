@@ -147,6 +147,17 @@
         </div>
         <p class="muted" id="ctrlHint" style="margin:10px 0 0;font-size:13px"></p>
 
+        <!-- A 类四项：会静默外泄数据的通道，客户机上默认关。这里点一下是经服务端转给
+             该设备的 employee 页执行——本地 API 只绑回环，运维机直接调不到客户的 GateDesk。
+             勾选状态以服务端广播的 permissions 为准，不是本地点了就当真。 -->
+        <div class="actions" id="permRow" style="margin-top:12px">
+          <span class="muted" style="font-size:13px">A 类权限：</span>
+          <label class="perm"><input type="checkbox" data-perm="keyboard"> 键鼠</label>
+          <label class="perm"><input type="checkbox" data-perm="clipboard"> 剪贴板</label>
+          <label class="perm"><input type="checkbox" data-perm="audio"> 声音</label>
+          <label class="perm"><input type="checkbox" data-perm="file"> 文件传输</label>
+        </div>
+
         <div class="chat" id="chatPanel" hidden>
           <div class="chat-head">与客户聊天</div>
           <div class="chat-msgs" id="chatMsgs"></div>
@@ -325,6 +336,7 @@
             appendMessage(data.message);
           } else if (data.type === 'session-state') {
             setState(data.state);
+            setPermRow(data.permissions);
           } else if (data.type === 'control-started') {
             setState('assisting');
           } else if (data.type === 'control-ended' || data.type === 'peer-ended') {
@@ -350,6 +362,8 @@
         if (!deviceId) return;
         if (ws) { ws.close(); ws = null; }
         activeDevice = { id: deviceId };
+        // 换设备时先把四项清空：上一位客户的权限不能留在这一位的复选框里。
+        setPermRow({});
         $('listCard').hidden = true;
         $('activeCard').hidden = false;
         $('deviceIdText').textContent = deviceId;
@@ -450,6 +464,33 @@
         }
       }
 
+      // A 类四项由客户机执行：本服务够不着客户的 127.0.0.1，运维页更够不着，所以这里只把
+      // 意图经 WS 转给那台设备的 employee 页，由它调自己的本地 API。复选框不本地翻转，等
+      // 服务端广播 permissions 回来再画——否则客户机没开着、或本地 API 拒绝时，界面就在骗人。
+      let lastPerms = {};
+
+      function sendPermission(name, enabled) {
+        if (!ws || ws.readyState !== 1) {
+          alert('尚未连接到服务端，无法下发权限。');
+          setPermRow(lastPerms);
+          return;
+        }
+        ws.send(JSON.stringify({ type: 'permission-set', name, enabled }));
+        $('ctrlHint').textContent =
+          '已请求客户机' + (enabled ? '打开' : '关闭') + ' ' + name + '，等它回报结果。';
+        // 先把勾拉回服务端已知的状态：这次点到底成没成，要等客户机回报，
+        // 眼下不能给一个它没确认过的勾。
+        setPermRow(lastPerms);
+      }
+
+      function setPermRow(perms) {
+        if (!perms) return;
+        lastPerms = perms;
+        document.querySelectorAll('#permRow input[data-perm]').forEach((el) => {
+          el.checked = !!perms[el.dataset.perm];
+        });
+      }
+
       async function toggleVoice() {
         try {
           await localJson('/voice', {
@@ -492,6 +533,9 @@
       $('chatInput').addEventListener('keydown', (e) => { if (e.key === 'Enter') sendChat(); });
       $('approvalList').addEventListener('click', onApprovalClick);
       $('approvalList').addEventListener('change', onApprovalChange);
+      document.querySelectorAll('#permRow input[data-perm]').forEach((el) => {
+        el.addEventListener('change', () => sendPermission(el.dataset.perm, el.checked));
+      });
       document.querySelectorAll('input[name=role]').forEach((r) => {
         r.addEventListener('change', async () => {
           role = r.value;
