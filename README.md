@@ -48,10 +48,33 @@ Endpoints on this service:
 | `GET` | `/api/audit` | Query: `?action=`, `?deviceId=`, `?limit=` (default 200). |
 | `POST` | `/api/audit/clear` | Reset the in-memory buffer (tests / demos). |
 | `GET` | `/audit` | Live dashboard (`public/audit.html`) — filter, count-by-action, optional 3s auto-refresh. |
+| `POST` | `/api/event` | Receives one outbound event notification from a controlled machine (`{"event","device_id","session_id","peer_id","ts","extra"}`) and broadcasts it over WebSocket to that device's room. `400` without `device_id` or `event`. See “Outbound event notification” below. |
+| `GET` | `/api/event` | Query: `?deviceId=`, `?limit=` (default 50). In-memory only — for smoke-testing and debugging, not a record. |
 
 Every machine also keeps a local JSON-Lines fallback at `<log dir>/audit.log`, so events survive an audit-server outage.
 
-Self-contained closed-loop test (starts its own `server.js` on `TEST_PORT`, default 3210, posts desktop-shaped payloads, asserts the query results, then shuts it down):
+## Outbound event notification (interface doc §6.10)
+
+Polling `GET /sessions` on the local API (127.0.0.1:21120) is how a page discovers that a peer is waiting to be let in or is asking for a permission. That works, but the decision window for a control request is **60 seconds**, so a slow poll can miss it outright.
+
+The controlled machine can instead *push*. With `[options] event-server-url = 'http://<operator-ip>:${PORT}/api/event'` set, the desktop posts a small hint (`login.pending`, `control.pending`, `session.open`, `session.close`) the moment the state changes; this service broadcasts it to the browsers of that device, and the pages immediately re-read `/sessions`.
+
+Three things worth knowing before relying on it:
+
+- **It is a hint, not state.** A notification can be dropped, duplicated or arrive after the request was already answered by hand. The pages always go back to `GET /sessions`; the notification only decides *when* they look.
+- **Nothing is sent until the option is set.** It is empty by default and the `start*.sh` scripts do not write it — set it by hand on the controlled machine (and restart GateDesk). No option, no events, and the pages fall back to plain polling.
+- **It is not the audit trail.** `/api/audit` is the record (retried, with a local fallback); `/api/event` is a doorbell (3 second cap, no retry, nothing on disk).
+
+Because a page cannot tell whether the machine it talks to has the option set, both pages poll at **2 seconds** until they have seen at least one event, then relax to **30 seconds**. So an unconfigured machine behaves exactly as before.
+
+Self-contained check that does not need a desktop client:
+
+```bash
+curl -X POST "http://localhost:${PORT}/api/event" -H 'Content-Type: application/json' \
+  -d '{"event":"control.pending","device_id":"123456789","session_id":3,"peer_id":"987654321","ts":0,"extra":{"permission":""}}'
+curl "http://localhost:${PORT}/api/event?limit=10"
+```
+
 
 ```sh
 npm ci

@@ -107,6 +107,18 @@ function toPublic(device) {
 const auditLog = []; // {action, actor, device_id, session_id, ts, result, extra, receivedAt}
 const AUDIT_LOG_CAP = 5000;
 
+// ---------------------------------------------------------------------------
+// 出站事件通知的接收端（接口文档 §6.10）
+//   被控端在「有对端等批准 / 有对端申请」时主动 POST 到 /api/event，服务端把它
+//   推给该设备房间里的浏览器，页面收到就立即去查本机 GET /sessions。
+//
+//   与上面审计的区别是刻意的：审计是**记录**（要留、要对账），事件是**提示**
+//   （丢了不影响正确性，页面本来就有兜底轮询）。所以这里既不进 auditLog、也不
+//   落盘 —— 下面这个小环只为排查与自测方便，重启即空。
+// ---------------------------------------------------------------------------
+const eventLog = []; // {event, device_id, session_id, peer_id, extra, receivedAt}
+const EVENT_LOG_CAP = 200;
+
 function audit(ev) {
   const rec = {
     action: String((ev && ev.action) || 'unknown').slice(0, 64),
@@ -260,6 +272,50 @@ app.post('/api/audit/clear', (req, res) => {
   const cleared = auditLog.length;
   auditLog.length = 0;
   res.json({ ok: true, cleared });
+});
+
+// 桌面端出站事件通知（接口文档 §6.10）：受控端 POST 一条，服务端广播给页面。
+// 成功响应只看 2xx，body 里没有平台要给桌面端的话 —— 桌面端不重试、不看结果。
+app.post('/api/event', (req, res) => {
+  const body = req.body;
+  if (!body || typeof body !== 'object' || Array.isArray(body)) {
+    return res.status(400).json({ ok: false, error: '事件载荷必须是单个对象' });
+  }
+  const deviceId = String(body.device_id || '');
+  const event = String(body.event || '');
+  if (!deviceId || !event) {
+    return res.status(400).json({ ok: false, error: '缺少 device_id 或 event' });
+  }
+  const rec = {
+    event: event.slice(0, 64),
+    device_id: deviceId.slice(0, 128),
+    session_id: Number(body.session_id) || 0,
+    peer_id: String(body.peer_id || '').slice(0, 128),
+    extra: (body.extra && typeof body.extra === 'object') ? body.extra : {},
+    receivedAt: Date.now(),
+  };
+  eventLog.push(rec);
+  if (eventLog.length > EVENT_LOG_CAP) eventLog.splice(0, eventLog.length - EVENT_LOG_CAP);
+  // 只广播，不替页面做决定：那个申请可能已经被现场的人点了，或已经超时。
+  broadcast(rec.device_id, {
+    type: 'event',
+    event: rec.event,
+    deviceId: rec.device_id,
+    sessionId: rec.session_id,
+    peerId: rec.peer_id,
+    extra: rec.extra,
+    at: rec.receivedAt,
+  });
+  console.log(`[event] ${rec.event} device=${rec.device_id} session=${rec.session_id} peer=${rec.peer_id}`);
+  res.json({ ok: true });
+});
+
+// 查询最近收到的事件（排查 / 自测用）。
+app.get('/api/event', (req, res) => {
+  const deviceId = String(req.query.deviceId || '');
+  const limit = Math.min(Math.max(parseInt(String(req.query.limit || '50'), 10) || 50, 1), EVENT_LOG_CAP);
+  const list = deviceId ? eventLog.filter((e) => e.device_id === deviceId) : eventLog;
+  res.json({ ok: true, total: list.length, events: list.slice(-limit) });
 });
 
 // ── 本机 GateDesk 本地 API 代理（admin 运维页用）────────────────────────────

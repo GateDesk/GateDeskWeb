@@ -185,7 +185,6 @@
       let role = 'operator';
       let activeDevice = null;
       let ws = null;
-      let voiceOn = false;
       let nativeActive = false; // 本机已通过 /connect 发起原生会话且尚未结束
       let selfId = null; // 运维机自己的 GateDesk ID，设备列表里排除，避免自己和自己聊天
 
@@ -362,6 +361,10 @@
             nativeActive = false;
             if (data.type === 'peer-ended' && data.by === 'user') alert('客户已结束协助。');
             setState('online');
+          } else if (data.type === 'event') {
+            // §6.10 的事件只是提醒，不是状态：到达时那个申请可能已经被现场的人点了，
+            // 或已经超时。所以拿它当「现在去查一次」的信号，而不是直接改界面。
+            onServerEvent();
           }
         };
         sock.onclose = (event) => {
@@ -476,28 +479,18 @@
         loadDevices();
       }
 
-      // 向对端要键鼠控制权（GateDesk-api.md §6.1 POST /request-control）。
-      // 控制端请求的方式就是把 disable_keyboard 选项清掉，和原生窗口菜单里的
-      // 「请求控制」是同一件事；对端会弹自己的确认界面，不点则会话保持只读。
+      // 向对端要键鼠控制权（GateDesk-api.md §6.9 POST /request-permission，name=keyboard）。
+      // 控制端请求的方式就是把 disable_keyboard 选项清掉，和原生窗口菜单里的「请求控制」
+      // 是同一件事；对端会弹自己的确认界面，不点则会话保持只读。键鼠是四个名字之一，
+      // 所以直接复用下面那个函数，不再单开一个端点。
       async function requestControl() {
-        const id = activeDevice && activeDevice.id;
-        if (!id) return;
-        try {
-          await localJson('/request-control', {
-            method: 'POST',
-            body: JSON.stringify({ id }),
-          });
-          $('ctrlHint').textContent =
-            '已向 ' + id + ' 请求键鼠控制。请在客户机的 GateDesk 上点「允许」，' +
-            '60 秒内无应答按拒绝处理。';
-        } catch (e) {
-          alert('请求控制失败：' + e.message);
-        }
+        await requestPermission('keyboard');
       }
 
-      // 向对端要 A 类四项之一（GateDesk-api.md §6.10 POST /request-permission）。和
-      // 「请求控制」一样只走本机本地 API：本机 GateDesk 的会话进程把请求当 OptionMessage
-      // 发给对端，对端会弹自己的确认界面，客户不点就什么也不会变。所以这里没有勾选框——
+      // 向对端要四项 A 类权限之一（GateDesk-api.md §6.9 POST /request-permission，
+      // v1.15 起 `keyboard` 也是其中一个名字）。和「请求控制」一样只走本机本地 API：
+      // 本机 GateDesk 的会话进程把请求当 OptionMessage 发给对端，对端会弹自己的确认
+      // 界面，客户不点就什么也不会变。所以这里没有勾选框——
       // 这是「问」，不是本机的一个状态；勾在谁名下、客户答了什么，只有客户那台机器知道。
       const PERM_LABELS = { keyboard: '键鼠', clipboard: '剪贴板', audio: '声音', file: '文件传输' };
 
@@ -518,17 +511,11 @@
         }
       }
 
+      // 「打开语音」在运维页就是请客户机把 audio 权限给出来：语音是受控端会话内的开关，
+      // 本机（控制端）读不到也改不了对端的状态，所以走与「请求客户机开启：声音」同一条路，
+      // 不再假装它是本机的一个开关（本机没有会话时 /voice 会直接 409）。
       async function toggleVoice() {
-        try {
-          await localJson('/voice', {
-            method: 'POST', headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ enabled: !voiceOn }),
-          });
-          voiceOn = !voiceOn;
-          $('voiceBtn').textContent = voiceOn ? '关闭语音' : '打开语音';
-        } catch (e) {
-          alert('语音切换失败：' + e.message);
-        }
+        await requestPermission('audio');
       }
 
       async function endSession(deviceId) {
@@ -592,10 +579,13 @@
       }
 
       // ── 本机会话与批准：§6.7.2 /approve、§6.7.3 /control（GateDesk-api.md）────
-      // 本地 API 没有推送通道（§8.1 要求平台也轮询），所以靠轮询 GET /sessions 发现
-      // authorized=false（有人在请求接入）与 pending_control=true（有人在请求接管键鼠）。
+      // 发现变化有两条路（§6.10）：桌面端配了 event-server-url 时会推事件，平台把它经
+      // WebSocket 转给本页，页面收到就立刻查一次 /sessions；轮询只是兜底。
+      // 页面无从知道对面配没配，所以先按快节奏轮询，**一旦真的收到过一条事件**就说明链路
+      // 是通的，兜底随即放慢 —— 否则在没配的机器上会退化成「几十秒才发现有人敲门」。
       const CONTROL_WINDOW_MS = 60000; // 与控制层 CONTROL_REQUEST_TIMEOUT 对齐
-      const SESSIONS_POLL_MS = 2000;   // 必须显著小于 60 秒，否则会错过控制窗口
+      const SESSIONS_POLL_FAST_MS = 2000;   // 必须显著小于 60 秒，否则会错过控制窗口
+      const SESSIONS_POLL_SLOW_MS = 30000;  // 事件链路已验证，兜底只为补齐丢掉的推送
       // §6.7.4 白名单里给客户看的四项。restart / recording 偏运维，block_input 仅
       // Windows，privacy_mode 要看平台实现，这三类留给桌面端面板。
       const PERMISSIONS = [
@@ -607,6 +597,29 @@
       const pendingSince = new Map(); // 会话 id -> 首次看到 pending_control 的时刻
       let sessionsSig = '';
       let noteTimer = null;
+      let sessionsTimer = null;
+      let sessionsPollMs = SESSIONS_POLL_FAST_MS;
+
+      // 定时拉 /sessions。
+      function startSessionsPolling() {
+        if (!TOKEN) return;
+        if (sessionsTimer) clearInterval(sessionsTimer);
+        pollSessions();
+        sessionsTimer = setInterval(pollSessions, sessionsPollMs);
+      }
+
+      // 收到一条 §6.10 事件（“去看一眼”，不是状态本身）：立刻查一次，
+      // 并把兜底轮询放慢 —— 链路已经证明是通的。
+      function onServerEvent() {
+        if (sessionsPollMs !== SESSIONS_POLL_SLOW_MS) {
+          sessionsPollMs = SESSIONS_POLL_SLOW_MS;
+          if (sessionsTimer) {
+            clearInterval(sessionsTimer);
+            sessionsTimer = setInterval(pollSessions, sessionsPollMs);
+          }
+        }
+        pollSessions();
+      }
 
       function sessionPeer(s) {
         return (s.name || '').trim() || s.peer_id || '未知对端';
@@ -829,11 +842,8 @@
         loadDevices();
         setInterval(() => { if (!activeDevice) loadDevices(); }, 3000);
         setInterval(watchNativeSession, 2000);
-        // 轮询本机会话：/sessions 没有推送通道，必须主动查（§8.1 也要求间隔远小于 60 秒）。
-        if (TOKEN) {
-          pollSessions();
-          setInterval(pollSessions, SESSIONS_POLL_MS);
-        }
+        // 本机会话：事件是快路径（§6.10），轮询是兜底（§8.1 要求间隔远小于 60 秒）。
+        startSessionsPolling();
       }
       init();
     </script>
