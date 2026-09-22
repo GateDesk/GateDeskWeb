@@ -40,7 +40,6 @@
       button:disabled { background: #9ca3af; cursor: not-allowed; }
       .enter-btn { background: #2563eb; }
       .control-btn { background: #7c3aed; }
-      .request-btn { background: #b45309; }
       .localoff-btn { background: #0891b2; }
       .voice-btn { background: #0d9488; }
       .end-btn { background: #dc2626; }
@@ -140,7 +139,6 @@
         </div>
         <div class="actions" style="margin-top:14px">
           <button class="control-btn" id="controlBtn">开始协助</button>
-          <button class="request-btn" id="requestCtrlBtn" disabled>请求控制客户端鼠标键盘</button>
           <button class="localoff-btn" id="localOffBtn" disabled>断开本地会话</button>
           <button class="voice-btn" id="voiceBtn">打开语音</button>
           <button class="end-btn" id="endBtn">结束协助</button>
@@ -148,10 +146,9 @@
         <p class="muted" id="ctrlHint" style="margin:10px 0 0;font-size:13px"></p>
 
         <!-- A 类四项：会静默外泄数据的通道，客户机上默认关。这里点一下是向客户机的
-             GateDesk 发一个「请求开启」——和「请求控制客户端鼠标键盘」走的是同一条路
-             （本机本地 API 的 /request-permission），最终由客户在他自己那台机器的
-             GateDesk 上点「允许」。所以这里没有勾选框：这不是本机的一个状态，读不到，
-             画一个勾就是在骗人。 -->
+             GateDesk 发一个「请求开启」，走本机本地 API 的 /request-permission，最终由
+             客户在他自己那台机器的 GateDesk 上点「允许」。所以这里没有勾选框：这不是
+             本机的一个状态，读不到，画一个勾就是在骗人。 -->
         <div class="actions" id="permRow" style="margin-top:12px">
           <span class="muted" style="font-size:13px">请求客户机开启：</span>
           <button class="btn-small btn-allow" data-perm-req="keyboard" disabled>键鼠</button>
@@ -317,7 +314,6 @@
         $('localOffBtn').disabled = state !== 'assisting';
         // Asking a peer to do anything only makes sense while we are actually in a session
         // with it; outside one there is no connection to ask on.
-        $('requestCtrlBtn').disabled = state !== 'assisting';
         document.querySelectorAll('#permRow button[data-perm-req]').forEach((el) => {
           el.disabled = state !== 'assisting';
         });
@@ -479,16 +475,8 @@
         loadDevices();
       }
 
-      // 向对端要键鼠控制权（GateDesk-api.md §6.9 POST /request-permission，name=keyboard）。
-      // 控制端请求的方式就是把 disable_keyboard 选项清掉，和原生窗口菜单里的「请求控制」
-      // 是同一件事；对端会弹自己的确认界面，不点则会话保持只读。键鼠是四个名字之一，
-      // 所以直接复用下面那个函数，不再单开一个端点。
-      async function requestControl() {
-        await requestPermission('keyboard');
-      }
-
       // 向对端要四项 A 类权限之一（GateDesk-api.md §6.9 POST /request-permission，
-      // v1.15 起 `keyboard` 也是其中一个名字）。和「请求控制」一样只走本机本地 API：
+      // v1.15 起 `keyboard` 也是其中一个名字）。只走本机本地 API：
       // 本机 GateDesk 的会话进程把请求当 OptionMessage 发给对端，对端会弹自己的确认
       // 界面，客户不点就什么也不会变。所以这里没有勾选框——
       // 这是「问」，不是本机的一个状态；勾在谁名下、客户答了什么，只有客户那台机器知道。
@@ -539,7 +527,6 @@
 
       $('backBtn').addEventListener('click', backToList);
       $('controlBtn').addEventListener('click', () => startControl(activeDevice.id));
-      $('requestCtrlBtn').addEventListener('click', requestControl);
       $('localOffBtn').addEventListener('click', disconnectLocal);
       $('voiceBtn').addEventListener('click', toggleVoice);
       $('endBtn').addEventListener('click', () => endSession());
