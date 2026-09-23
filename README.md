@@ -93,7 +93,7 @@ Sessions the operator client opens through `POST /connect` record themselves and
 
 The protocol is upstream rustdesk's: `type=new/part/tail/remove` as query parameters, with the bytes as the raw body. Parts go up while the file is still being written (1 second or 1 MB, whichever comes first); `record-upload-mode = 'whole'` on the client sends it in one request after the file is closed instead. Each request is retried three times — when that fails the recording stays on the operator's machine and a `record.upload.fail` event says so, with `record.upload.done` when it lands.
 
-Files land in `recordings/<device_id>/<session_id>/`, beside a `.head` (the first 1024 bytes, enough to tell the container) and a `.json` holding the size and upload time. The directory is gitignored, and nothing here deletes them: retention belongs to the client, which drops its own copy seven days after a successful upload.
+Files land in `recordings/<device_id>/<session_id>/`, beside a `.head` (the first 1024 bytes, enough to tell the container) and a `.json` holding the size and upload time. The directory is gitignored, and nothing here deletes them: retention belongs to the client, which drops its own copy three days after a successful upload.
 
 ## Notes
 
