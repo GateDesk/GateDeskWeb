@@ -184,6 +184,44 @@
         return out;
       }
 
+      // 备用连接凭据：GateDesk 的永久密码通道，本机长期有效，页面存在 localStorage 里
+      // （key 带设备 ID——换浏览器就要重新生成一次）。服务端不生成凭据，只收页面报上来的
+      // 那一枚；运维点「开始协助」时用的就是它，所以两处必须始终是同一个值。
+      const passwordKey = (id) => 'gatedesk_conn_password_' + id;
+      function storedPassword(id) {
+        try { return localStorage.getItem(passwordKey(id)) || ''; } catch { return ''; }
+      }
+      function rememberPassword(id, pw) {
+        try { localStorage.setItem(passwordKey(id), pw); } catch { }
+      }
+
+      // 写进本机 GateDesk。这是全流程里唯一会写永久密码的地方，GateDesk 每写一次都会记一条
+      // auth.grant 审计，所以只在真的需要时才调（首次生成、本机丢了密码、或点请求协助）。
+      async function writePasswordToGateDesk(pw) {
+        await localJson('/password', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ password: pw }),
+        });
+      }
+
+      // 上报本机 ID + 当前凭据（服务端由此获得本机 ID）。
+      async function registerDevice() {
+        const res = await fetch(ENDPOINT + '/api/device/register', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ id: deviceId, password: currentPassword }),
+        });
+        return await res.json();
+      }
+
+      // 换一枚新凭据：本机写新的、本地记新的、服务端也更新。旧的立刻失效。
+      async function rotatePassword() {
+        currentPassword = randPassword(8);
+        await writePasswordToGateDesk(currentPassword);
+        rememberPassword(deviceId, currentPassword);
+        await registerDevice();
+      }
+
       function escapeHtml(s) {
         return String(s).replace(/[&<>"']/g, (c) => (
           { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]
@@ -301,19 +339,17 @@
         deviceId = data.id;
         $('deviceLine').innerHTML =
           '本机 GateDesk ID：<span class="id-num">' + escapeHtml(deviceId) + '</span><span class="muted" id="selfStatus"></span>';
-        // 1) 轮换一个随机连接密码
-        currentPassword = randPassword(8);
-        await localJson('/password', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ password: currentPassword }),
-        });
-        // 2) 上报本机 ID 与密码（服务端由此获得本机 ID）
-        const res = await fetch(ENDPOINT + '/api/device/register', {
-          method: 'POST', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ id: deviceId, password: currentPassword }),
-        });
-        const reg = await res.json();
+        // 1) 备用凭据：localStorage 里那份是固定的，只有第一次（或清了站点数据）才生成。
+        currentPassword = storedPassword(deviceId) || randPassword(8);
+        // 本机 GateDesk 已经有一枚永久密码时不重写：`/password` 每次都记一条 auth.grant
+        // 审计，没必要每开一次页面就记一遍；只有它真的没了（assistable=false）才补写。
+        const st0 = await localJson('/status').catch(() => null);
+        if (!storedPassword(deviceId) || !st0 || !st0.assistable) {
+          await writePasswordToGateDesk(currentPassword);
+        }
+        rememberPassword(deviceId, currentPassword);
+        // 2) 上线：服务端由此得到本机 ID 与凭据
+        const reg = await registerDevice();
         if (!reg.ok) throw new Error(reg.error || '上线失败');
         $('sessionCard').hidden = false;
         renderState(reg.device.state);
@@ -360,15 +396,14 @@
       // 服务端会把同一个权限请求投两遍，客户就会看到两次确认。
       async function reRegister() {
         try {
-          await fetch(ENDPOINT + '/api/device/register', {
-            method: 'POST', headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ id: deviceId, password: currentPassword }),
-          });
+          await registerDevice();
         } catch (e) { /* 下次心跳再试 */ }
       }
 
       async function requestHelp() {
         try {
+          // 每次请求协助都换一枚新凭据：旧的立刻失效，运维手里拿到的就是这一枚。
+          await rotatePassword();
           const res = await fetch(ENDPOINT + '/api/request/create', {
             method: 'POST', headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ deviceId }),
@@ -387,18 +422,7 @@
             method: 'POST', headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ deviceId, by: 'user' }),
           });
-          // 轮换密码，使已下发的旧凭据失效
-          if (TOKEN) {
-            currentPassword = randPassword(8);
-            await localJson('/password', {
-              method: 'POST', headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ password: currentPassword }),
-            });
-            await fetch(ENDPOINT + '/api/device/register', {
-              method: 'POST', headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ id: deviceId, password: currentPassword }),
-            });
-          }
+          // 凭据不在这里轮换：它现在是本机长期有效的备用凭据，只在点「请求协助」时换新。
         } catch (e) {
           console.warn('end assist error', e);
         }
