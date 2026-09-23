@@ -61,31 +61,9 @@
       .chat-input-row { display: flex; gap: 8px; padding: 10px; background: #fff; }
       .chat-input-row input { flex: 1; font-size: 14px; padding: 10px 12px; border: 1px solid #d1d5db; border-radius: 8px; }
       .chat-input-row button { padding: 10px 16px; font-size: 14px; background: #2563eb; }
-      /* 服务机会话与批准（GateDesk-api.md §6.7）：作用于运行本服务的这台机器 */
-      .approval-item {
-        border: 1px solid #e5e7eb; border-radius: 10px; padding: 12px; margin-bottom: 10px;
-        background: #fff; display: grid; gap: 8px;
-      }
-      .approval-item:last-child { margin-bottom: 0; }
-      .approval-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
-      .badge {
-        border-radius: 999px; padding: 3px 10px; font-size: 12px; font-weight: bold;
-        background: #e5e7eb; color: #374151;
-      }
-      .badge.wait { background: #fef3c7; color: #92400e; }
-      .badge.ctrl { background: #fee2e2; color: #991b1b; }
-      .badge.live { background: #dcfce7; color: #166534; }
-      .control-ask {
-        background: #fef2f2; border: 1px solid #fecaca; border-radius: 8px;
-        padding: 8px 10px; color: #991b1b; font-size: 14px;
-      }
-      .control-ask .countdown { font-family: monospace; font-weight: bold; }
-      .perm { display: inline-flex; align-items: center; gap: 5px; font-size: 14px; color: #374151; }
+      /* 「请求客户机开启」那四个按钮 */
       .btn-small { padding: 8px 14px; font-size: 14px; }
       .btn-allow { background: #16a34a; }
-      .btn-deny { background: #6b7280; }
-      #approvalState { color: #4b5563; }
-      #approvalNote { font-size: 13px; min-height: 18px; color: #166534; }
     </style>
   </head>
   <body>
@@ -98,17 +76,6 @@
       <div id="selfId" class="banner info">
         操作员机（打开本页的这台机器）GateDesk ID：<span class="id-num" id="selfIdText">-</span>
         <span class="muted" id="selfStatusText"></span>
-      </div>
-
-      <div class="card" id="approvalCard">
-        <h2 style="margin:0">服务机会话与批准</h2>
-        <div class="meta" style="margin-top:6px">
-          §6.7 的批准动作作用于<b>运行本服务的这台机器（服务机）</b>（代理固定指向它的 127.0.0.1:21120）。
-          本机 API 只绑回环，所以服务机批准不到客户机的会话 —— 客户机的批准在它自己的 /employee 页上做。
-        </div>
-        <div class="meta" id="approvalState" style="margin-top:6px">正在读取会话…</div>
-        <div class="list" id="approvalList"></div>
-        <div id="approvalNote"></div>
       </div>
 
       <div class="card" id="roleCard">
@@ -170,8 +137,8 @@
 
     <script>
       const ENDPOINT = location.origin;
-      // GateDesk 本地 API token 取自 URL（运维端打开本页时带入），操作员机与服务机共用同一个值；
-      // sessionStorage，刷新保持（同标签页内）。
+      // GateDesk 本地 API token 取自 URL（运维端打开本页时带入），供打开本页这台机器的
+      // 127.0.0.1:21120 使用；sessionStorage，刷新保持（同标签页内）。
       const urlToken = new URLSearchParams(location.search).get('token') || '';
       const TOKEN = (urlToken || sessionStorage.getItem('gd_token') || '');
       if (urlToken) {
@@ -187,15 +154,13 @@
 
       const $ = (id) => document.getElementById(id);
 
-      // 页面上有两个「本机」，它们是不同的机器，必须分开：
+      // 本页只跟**打开本页的这台机器**（操作员机）的 GateDesk 说话：`localJson` 直连它的
+      // 127.0.0.1:21120。发起远程会话的必须是它——会话是本机进程，`--connect` 由谁起，
+      // 谁才是控制端；`/id`、`/status`、`/request-permission` 说的也都是「我」。
       //
-      // `localJson` 打的是**打开本页的这台机器**的 127.0.0.1:21120。发起远程会话的必须
-      // 是它——会话是本机进程，`--connect` 由谁起，谁才是控制端；`/id`、`/status`、
-      // `/request-permission` 说的也都是「我」。
-      //
-      // `serviceJson` 走服务端 /api/local 代理，落在**运行 server.js 的那台机器**上
-      // （代理里写死了它的回环）。只有 §6.7 那组被控端动作属于它：本机 API 只绑回环，
-      // 服务端够不到客户机，所以运维页批准到的只能是服务机自己的会话。
+      // 受控端的批准（§6.7 /approve、/control、/permission）不在本页：那些动作落在**被连
+      // 进来**的那台机器上，而本机 API 只绑回环，运维机够不到客户机。客户机上的批准在它
+      // 自己的 /employee 页做（那一页的 localJson 打的是它自己）。
       const LOCAL = 'http://127.0.0.1:21120';
 
       // 直连失败时浏览器只给一句 "Failed to fetch"，看不出是没装 GateDesk 还是这台机器
@@ -214,7 +179,7 @@
         try { body = await res.json(); } catch { }
         if (!res.ok) {
           const err = new Error((body && body.error) || ('HTTP ' + res.status));
-          err.status = res.status; // 调用方需要区分 409/503/504（GateDesk-api.md §7）
+          err.status = res.status; // 状态码随错误带上，调用方按需区分
           throw err;
         }
         return body;
@@ -232,17 +197,6 @@
         } catch (e) {
           throw directFailure(e);
         }
-        return await readJson(res);
-      }
-
-      // 服务端代理（同源），token 随请求带上由服务端校验；落在服务机上，不走浏览器所在机器。
-      async function serviceJson(path, options) {
-        const sep = path.includes('?') ? '&' : '?';
-        const res = await fetch(ENDPOINT + '/api/local' + path + sep + 'token=' + encodeURIComponent(TOKEN), {
-          method: (options && options.method) || 'GET',
-          headers: { 'Content-Type': 'application/json' },
-          body: (options && options.body) || undefined,
-        });
         return await readJson(res);
       }
 
@@ -292,7 +246,7 @@
       }
 
       function renderList(devices) {
-        // `selfId` 是**操作员机**（本页所在机器）的 GateDesk ID，不是服务机的：操作员机自己
+        // `selfId` 是**操作员机**（本页所在机器）的 GateDesk ID：操作员机自己
         // 若也在跑 employee、登记成了客户设备，只有它还 clientOnline 时才列出来，否则自己跟
         // 自己没法聊。真实客户设备恒显示。
         const others = devices.filter((d) => d.id !== selfId || d.clientOnline === true);
@@ -399,10 +353,6 @@
             nativeActive = false;
             if (data.type === 'peer-ended' && data.by === 'user') alert('客户已结束协助。');
             setState('online');
-          } else if (data.type === 'event') {
-            // §6.10 的事件只是提醒，不是状态：到达时那个申请可能已经被现场的人点了，
-            // 或已经超时。所以拿它当「现在去查一次」的信号，而不是直接改界面。
-            onServerEvent();
           }
         };
         sock.onclose = (event) => {
@@ -577,8 +527,6 @@
       $('endBtn').addEventListener('click', () => endSession());
       $('chatSend').addEventListener('click', sendChat);
       $('chatInput').addEventListener('keydown', (e) => { if (e.key === 'Enter') sendChat(); });
-      $('approvalList').addEventListener('click', onApprovalClick);
-      $('approvalList').addEventListener('change', onApprovalChange);
       document.querySelectorAll('#permRow button[data-perm-req]').forEach((el) => {
         el.addEventListener('click', () => requestPermission(el.dataset.permReq));
       });
@@ -610,272 +558,12 @@
         }
       }
 
-      // ── 服务机会话与批准：§6.7.2 /approve、§6.7.3 /control（GateDesk-api.md）────
-      // 发现变化有两条路（§6.10）：桌面端配了 event-server-url 时会推事件，平台把它经
-      // WebSocket 转给本页，页面收到就立刻查一次 /sessions；轮询只是兜底。
-      // 页面无从知道对面配没配，所以先按快节奏轮询，**一旦真的收到过一条事件**就说明链路
-      // 是通的，兜底随即放慢 —— 否则在没配的机器上会退化成「几十秒才发现有人敲门」。
-      const CONTROL_WINDOW_MS = 60000; // 与控制层 CONTROL_REQUEST_TIMEOUT 对齐
-      const SESSIONS_POLL_FAST_MS = 2000;   // 必须显著小于 60 秒，否则会错过控制窗口
-      const SESSIONS_POLL_SLOW_MS = 30000;  // 事件链路已验证，兜底只为补齐丢掉的推送
-      // §6.7.4 白名单里给客户看的四项。restart / recording 偏运维，block_input 仅
-      // Windows，privacy_mode 要看平台实现，这三类留给桌面端面板。
-      const PERMISSIONS = [
-        { name: 'keyboard', label: '键鼠' },
-        { name: 'clipboard', label: '剪贴板' },
-        { name: 'audio', label: '声音' },
-        { name: 'file', label: '文件传输' },
-      ];
-      const pendingSince = new Map(); // 会话 id -> 首次看到 pending_control 的时刻
-      let sessionsSig = '';
-      let noteTimer = null;
-      let sessionsTimer = null;
-      let sessionsPollMs = SESSIONS_POLL_FAST_MS;
-
-      // 定时拉 /sessions。
-      function startSessionsPolling() {
-        if (!TOKEN) return;
-        if (sessionsTimer) clearInterval(sessionsTimer);
-        pollSessions();
-        sessionsTimer = setInterval(pollSessions, sessionsPollMs);
-      }
-
-      // 收到一条 §6.10 事件（“去看一眼”，不是状态本身）：立刻查一次，
-      // 并把兜底轮询放慢 —— 链路已经证明是通的。
-      function onServerEvent() {
-        if (sessionsPollMs !== SESSIONS_POLL_SLOW_MS) {
-          sessionsPollMs = SESSIONS_POLL_SLOW_MS;
-          if (sessionsTimer) {
-            clearInterval(sessionsTimer);
-            sessionsTimer = setInterval(pollSessions, sessionsPollMs);
-          }
-        }
-        pollSessions();
-      }
-
-      function sessionPeer(s) {
-        return (s.name || '').trim() || s.peer_id || '未知对端';
-      }
-
-      // 只有远程桌面类会话有这套权限开关；文件传输 / 摄像头 / 终端没有键鼠可给。
-      function isDesktopSession(s) {
-        return !s.is_file_transfer && !s.is_view_camera && !s.is_terminal && !s.port_forward;
-      }
-
-      function sessionBadge(s) {
-        if (s.disconnected) return '<span class="badge">已结束</span>';
-        if (!s.authorized) return '<span class="badge wait">等待接入</span>';
-        if (s.pending_control) return '<span class="badge ctrl">请求控制</span>';
-        return '<span class="badge live">协助中</span>';
-      }
-
-      function actionBtn(act, id, label, cls, accept) {
-        const extra = accept === undefined ? '' : ` data-accept="${accept}"`;
-        return `<button class="btn-small ${cls}" data-act="${act}" data-id="${id}"${extra}>${label}</button>`;
-      }
-
-      function sessionHtml(s) {
-        const out = ['<div class="approval-item">'];
-        out.push(
-          `<div class="approval-head"><b>${escapeHtml(sessionPeer(s))}</b>` +
-            `<span class="meta">ID ${escapeHtml(s.peer_id || '—')}</span>${sessionBadge(s)}</div>`
-        );
-        if (!s.authorized && !s.disconnected) {
-          out.push('<div class="meta">该对端正在请求接入服务机。</div>');
-          out.push(
-            '<div class="actions">' +
-              actionBtn('approve', s.id, '允许接入', 'btn-allow', true) +
-              actionBtn('approve', s.id, '拒绝', 'btn-deny', false) +
-              '</div>'
-          );
-        }
-        if (s.pending_control) {
-          const since = pendingSince.get(s.id) || Date.now();
-          out.push(
-            '<div class="control-ask">对端请求接管服务机键盘鼠标，还有 ' +
-              `<span class="countdown" data-deadline="${since + CONTROL_WINDOW_MS}">…</span>，` +
-              '超时按拒绝处理。</div>'
-          );
-          out.push(
-            '<div class="actions">' +
-              actionBtn('control', s.id, '允许控制', 'btn-allow', true) +
-              actionBtn('control', s.id, '拒绝控制', 'btn-deny', false) +
-              '</div>'
-          );
-        }
-        if (s.authorized && !s.disconnected && isDesktopSession(s)) {
-          out.push(
-            '<div class="meta">权限（与「允许控制」是两道独立的闸门，都给了对端才能真正操作键鼠）：</div>'
-          );
-          out.push(
-            '<div class="actions">' +
-              PERMISSIONS.map(
-                (p) =>
-                  `<label class="perm"><input type="checkbox" data-act="permission" ` +
-                  `data-id="${s.id}" data-name="${p.name}"${s[p.name] ? ' checked' : ''}> ${p.label}</label>`
-              ).join('') +
-              '</div>'
-          );
-        }
-        out.push('<div class="actions">');
-        out.push(
-          s.disconnected
-            ? actionBtn('dismiss', s.id, '清理', 'btn-deny')
-            : actionBtn('terminate', s.id, '结束该会话', 'end-btn')
-        );
-        out.push('</div></div>');
-        return out.join('');
-      }
-
-      function sessionsSignature(list) {
-        return list
-          .map((s) =>
-            [
-              s.id, s.authorized, s.disconnected, s.pending_control,
-              s.keyboard, s.clipboard, s.audio, s.file,
-              s.name, s.peer_id,
-            ].join(',')
-          )
-          .join('|');
-      }
-
-      function renderApprovals(list) {
-        // 卡片常驻显示（批准入口藏起来就找不到了），所以只重建列表内容。
-        const sig = sessionsSignature(list);
-        if (sig === sessionsSig) return; // 内容没变就别重建 DOM，否则会闪、也会把倒计时重新起算
-        sessionsSig = sig;
-        $('approvalList').innerHTML = list.map(sessionHtml).join('');
-        tickCountdowns();
-      }
-
-      function tickCountdowns() {
-        const now = Date.now();
-        document.querySelectorAll('#approvalList [data-deadline]').forEach((el) => {
-          const left = Math.max(0, (Number(el.dataset.deadline) || 0) - now);
-          el.textContent = Math.ceil(left / 1000) + ' 秒';
-        });
-      }
-      setInterval(tickCountdowns, 500);
-
-      // 卡片常驻显示，所以“现在能不能批准、为什么不能”必须写出来。
-      function setApprovalState(text, kind) {
-        const el = $('approvalState');
-        el.textContent = text;
-        el.style.color = kind === 'bad' ? '#dc2626' : kind === 'warn' ? '#92400e' : '#4b5563';
-      }
-
-      async function pollSessions() {
-        if (!TOKEN) {
-          setApprovalState('未携带本地 API token，批准功能不可用。请用 start.sh 打开本页。', 'warn');
-          renderApprovals([]);
-          return;
-        }
-        let data;
-        try {
-          data = await serviceJson('/sessions');
-        } catch (e) {
-          pendingSince.clear();
-          if (e.status === 503) {
-            // 503 不是故障：服务机没有连接管理器在听（没有会话，或会话面板窗口已退出）。
-            setApprovalState('服务机没有会话面板在运行：当前没有对端接入服务机，或会话面板已退出。');
-          } else if (e.status === 401) {
-            setApprovalState('本地 API 返回 401：token 与服务端 API_TOKEN 不一致。', 'bad');
-          } else if (e.status === 502) {
-            setApprovalState('服务机 GateDesk 不可达：' + e.message, 'bad');
-          } else {
-            setApprovalState('无法读取会话列表：' + e.message, 'bad');
-          }
-          renderApprovals([]);
-          return;
-        }
-        const list = (data && data.sessions) || [];
-        // 服务端的 60 秒从请求抵达时开始算，页面只能从「第一次看到」起算，
-        // 所以这个倒计时最多乐观一个轮询周期；真正的裁决在服务端。
-        const seen = new Set();
-        for (const s of list) {
-          seen.add(s.id);
-          if (!s.pending_control) pendingSince.delete(s.id);
-          else if (!pendingSince.has(s.id)) pendingSince.set(s.id, Date.now());
-        }
-        for (const id of [...pendingSince.keys()]) {
-          if (!seen.has(id)) pendingSince.delete(id);
-        }
-        setApprovalState(
-          list.length === 0 ? '当前没有对端请求接入或控制。' : '以下对端需要处理：'
-        );
-        renderApprovals(list);
-      }
-
-      function note(text, bad) {
-        const el = $('approvalNote');
-        el.textContent = text || '';
-        el.style.color = bad ? '#dc2626' : '#166534';
-        if (noteTimer) clearTimeout(noteTimer);
-        if (text) noteTimer = setTimeout(() => { el.textContent = ''; }, 4000);
-      }
-
-      // §6.7 的动作都是幂等的：409 说明状态已经变了（放行已放行的、应答已被超时拒绝的
-      // 控制请求），504 说明连接管理器没在 2 秒内回话。这两种情况重新拉一次 /sessions 就够。
-      async function sessionAction(path, body, okText) {
-        try {
-          await serviceJson(path, { method: 'POST', body: JSON.stringify(body) });
-          note(okText);
-        } catch (e) {
-          if (e.status === 409 || e.status === 404 || e.status === 504) {
-            note('状态已变化，已刷新', true);
-          } else if (e.status === 503) {
-            note('服务机没有会话面板在运行，无法代为批准', true);
-          } else {
-            note('操作失败：' + e.message, true);
-          }
-        }
-        await pollSessions();
-      }
-
-      function onApprovalClick(event) {
-        const el = event.target.closest('button[data-act]');
-        if (!el) return;
-        const id = Number(el.dataset.id);
-        const accept = el.dataset.accept === 'true';
-        switch (el.dataset.act) {
-          case 'approve':
-            sessionAction('/approve', { id, accept }, accept ? '已放行接入' : '已拒绝接入');
-            break;
-          case 'control':
-            // 与桌面端面板一致：允许控制只应答控制请求，不动权限开关（两者是独立闸门）。
-            sessionAction('/control', { id, accept }, accept ? '已允许控制' : '已拒绝控制');
-            break;
-          case 'terminate':
-            if (confirm('结束该会话？对端会收到通知，之后可以重新连接。')) {
-              sessionAction('/terminate', { id }, '已结束该会话');
-            }
-            break;
-          case 'dismiss':
-            sessionAction('/dismiss', { id }, '已清理');
-            break;
-        }
-      }
-
-      function onApprovalChange(event) {
-        const el = event.target;
-        if (!el || el.dataset.act !== 'permission') return;
-        const found = PERMISSIONS.find((p) => p.name === el.dataset.name);
-        const label = (found && found.label) || el.dataset.name;
-        sessionAction(
-          '/permission',
-          { id: Number(el.dataset.id), name: el.dataset.name, enabled: el.checked },
-          label + (el.checked ? '已打开' : '已关闭')
-        );
-      }
-
       async function init() {
         loadSelfId();
         try { await login(); } catch (e) { /* 服务端可能尚未启动 */ }
         loadDevices();
         setInterval(() => { if (!activeDevice) loadDevices(); }, 3000);
         setInterval(watchNativeSession, 2000);
-        // 服务机会话：事件是快路径（§6.10），轮询是兜底（§8.1 要求间隔远小于 60 秒）。
-        startSessionsPolling();
       }
       init();
     </script>
