@@ -55,6 +55,7 @@ Endpoints on this service:
 | `GET` | `/audit` | Live dashboard (`public/audit.html`) — filter, count-by-action, optional 3s auto-refresh. |
 | `POST` | `/api/event` | Receives one outbound event notification from a controlled machine (`{"event","device_id","session_id","peer_id","ts","extra"}`) and broadcasts it over WebSocket to that device's room. `400` without `device_id` or `event`. See “Outbound event notification” below. |
 | `GET` | `/api/event` | Query: `?deviceId=`, `?limit=` (default 50). In-memory only — for smoke-testing and debugging, not a record. |
+| `POST` | `/api/record` | Receives a session recording uploaded by the console skin. The body is the **file bytes** (not JSON); the query carries `type=new/part/tail/remove`, `file`, `device_id`, `session_id`, plus `offset`/`length` for a part. Stored under `recordings/<device_id>/<session_id>/`. See “Session recordings” below. |
 
 Every machine also keeps a local JSON-Lines fallback at `<log dir>/audit.log`, so events survive an audit-server outage.
 
@@ -85,6 +86,14 @@ curl "http://localhost:${PORT}/api/event?limit=10"
 npm ci
 npm run audit:selftest
 ```
+
+## Session recordings
+
+Sessions the operator client opens through `POST /connect` record themselves and upload the file when they end. The target is derived from the setting the audit trail already uses — the origin of `audit-server-url` plus `/api/record` — so an address that is already configured is all it takes.
+
+The protocol is upstream rustdesk's: `type=new/part/tail/remove` as query parameters, with the bytes as the raw body. Parts go up while the file is still being written (1 second or 1 MB, whichever comes first); `record-upload-mode = 'whole'` on the client sends it in one request after the file is closed instead. Each request is retried three times — when that fails the recording stays on the operator's machine and a `record.upload.fail` event says so, with `record.upload.done` when it lands.
+
+Files land in `recordings/<device_id>/<session_id>/`, beside a `.head` (the first 1024 bytes, enough to tell the container) and a `.json` holding the size and upload time. The directory is gitignored, and nothing here deletes them: retention belongs to the client, which drops its own copy seven days after a successful upload.
 
 ## Notes
 

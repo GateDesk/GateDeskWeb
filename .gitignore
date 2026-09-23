@@ -19,6 +19,9 @@
 .DS_Store
 *.pem
 
+# 会话录像落盘目录（POST /api/record 写入，见 server.js）
+/recordings
+
 # debug
 npm-debug.log*
 yarn-debug.log*

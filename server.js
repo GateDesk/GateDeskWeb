@@ -9,6 +9,7 @@ const express = require('express');
 const http = require('http');
 const path = require('path');
 const crypto = require('crypto');
+const fs = require('fs');
 const { WebSocketServer } = require('ws');
 
 const app = express();
@@ -278,6 +279,77 @@ app.post('/api/audit/clear', (req, res) => {
   const cleared = auditLog.length;
   auditLog.length = 0;
   res.json({ ok: true, cleared });
+});
+
+// ---------------------------------------------------------------------------
+// 会话录像接收端
+//   控制端在 console 皮肤（非 --ui）下自动录屏，录完把文件传到这里 —— 与审计
+//   同理：录像要留在服务端，运维那台机器不是留痕的那一方。
+//
+//   协议沿用上游 rustdesk 的录像上传：query 参数 type=new/part/tail/remove，
+//   文件内容走 raw body（不是 JSON，所以这里挂 express.raw 而不是全局那个
+//   express.json）。额外带 device_id / session_id，用来分目录存放。
+//
+//   客户端负责分片与重试，服务端只按 offset 落盘：
+//     new    建空文件
+//     part   按 offset 写入 body
+//     tail   收尾，body 是文件头（保留成 .head，便于判断格式）
+//     remove 删除（录像过短被客户端丢弃时会发这个）
+//   落盘：recordings/<device_id>/<session_id>/<file>
+// ---------------------------------------------------------------------------
+const RECORD_ROOT = path.join(__dirname, 'recordings');
+// 单个分片的体积上限（客户端分片远小于它，这里只是防御）。
+const RECORD_PART_LIMIT = '64mb';
+
+function safeSegment(s) {
+  return String(s || '')
+    .replace(/[^A-Za-z0-9._-]/g, '_')
+    .slice(0, 120) || 'unnamed';
+}
+
+app.post('/api/record', express.raw({ type: () => true, limit: RECORD_PART_LIMIT }), (req, res) => {
+  const type = String(req.query.type || '');
+  const file = safeSegment(req.query.file);
+  const deviceId = safeSegment(req.query.device_id);
+  const sessionId = safeSegment(req.query.session_id);
+  const body = Buffer.isBuffer(req.body) ? req.body : Buffer.alloc(0);
+  const dir = path.join(RECORD_ROOT, deviceId, sessionId);
+  const target = path.join(dir, file);
+  try {
+    fs.mkdirSync(dir, { recursive: true });
+    if (type === 'new') {
+      fs.writeFileSync(target, Buffer.alloc(0));
+      console.log(`[record] new ${deviceId}/${sessionId}/${file}`);
+    } else if (type === 'part') {
+      const offset = Math.max(parseInt(String(req.query.offset || '0'), 10) || 0, 0);
+      const fd = fs.openSync(target, fs.existsSync(target) ? 'r+' : 'w');
+      fs.writeSync(fd, body, 0, body.length, offset);
+      fs.closeSync(fd);
+    } else if (type === 'tail') {
+      const size = fs.existsSync(target) ? fs.statSync(target).size : 0;
+      // 文件头单独留一份：录像容器（webm/mp4）看头就能认，服务端不必懂编码。
+      fs.writeFileSync(target + '.head', body);
+      fs.writeFileSync(
+        target + '.json',
+        JSON.stringify(
+          { file, device_id: deviceId, session_id: sessionId, size, uploadedAt: Date.now() },
+          null,
+          2
+        )
+      );
+      console.log(`[record] done ${deviceId}/${sessionId}/${file} (${size} bytes)`);
+    } else if (type === 'remove') {
+      for (const p of [target, target + '.head', target + '.json']) {
+        if (fs.existsSync(p)) fs.unlinkSync(p);
+      }
+    } else {
+      return res.status(400).json({ code: 1, message: `未知的 type: ${type}` });
+    }
+  } catch (e) {
+    console.error('[record] 失败:', e && e.message ? e.message : e);
+    return res.status(500).json({ code: 1, message: String((e && e.message) || e) });
+  }
+  res.json({ code: 0, message: 'success', data: '' });
 });
 
 // 桌面端出站事件通知（接口文档 §6.10）：受控端 POST 一条，服务端广播给页面。
