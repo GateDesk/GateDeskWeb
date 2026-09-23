@@ -61,7 +61,7 @@
       .chat-input-row { display: flex; gap: 8px; padding: 10px; background: #fff; }
       .chat-input-row input { flex: 1; font-size: 14px; padding: 10px 12px; border: 1px solid #d1d5db; border-radius: 8px; }
       .chat-input-row button { padding: 10px 16px; font-size: 14px; background: #2563eb; }
-      /* 本机会话与批准（GateDesk-api.md §6.7）：作用于运行本服务的这台机器 */
+      /* 服务机会话与批准（GateDesk-api.md §6.7）：作用于运行本服务的这台机器 */
       .approval-item {
         border: 1px solid #e5e7eb; border-radius: 10px; padding: 12px; margin-bottom: 10px;
         background: #fff; display: grid; gap: 8px;
@@ -96,15 +96,15 @@
       </div>
 
       <div id="selfId" class="banner info">
-        本机（运维端）GateDesk ID：<span class="id-num" id="selfIdText">-</span>
+        操作员机（打开本页的这台机器）GateDesk ID：<span class="id-num" id="selfIdText">-</span>
         <span class="muted" id="selfStatusText"></span>
       </div>
 
       <div class="card" id="approvalCard">
-        <h2 style="margin:0">本机会话与批准</h2>
+        <h2 style="margin:0">服务机会话与批准</h2>
         <div class="meta" style="margin-top:6px">
-          §6.7 的批准动作作用于<b>运行本服务的这台机器</b>（代理固定指向它的 127.0.0.1:21120）。
-          本机 API 只绑回环，所以运维机批准不到客户机的会话 —— 客户机的批准在它自己的 /employee 页上做。
+          §6.7 的批准动作作用于<b>运行本服务的这台机器（服务机）</b>（代理固定指向它的 127.0.0.1:21120）。
+          本机 API 只绑回环，所以服务机批准不到客户机的会话 —— 客户机的批准在它自己的 /employee 页上做。
         </div>
         <div class="meta" id="approvalState" style="margin-top:6px">正在读取会话…</div>
         <div class="list" id="approvalList"></div>
@@ -146,9 +146,9 @@
         <p class="muted" id="ctrlHint" style="margin:10px 0 0;font-size:13px"></p>
 
         <!-- A 类四项：会静默外泄数据的通道，客户机上默认关。这里点一下是向客户机的
-             GateDesk 发一个「请求开启」，走本机本地 API 的 /request-permission，最终由
+             GateDesk 发一个「请求开启」，走操作员机本地 API 的 /request-permission，最终由
              客户在他自己那台机器的 GateDesk 上点「允许」。所以这里没有勾选框：这不是
-             本机的一个状态，读不到，画一个勾就是在骗人。 -->
+             操作员机的一个状态，读不到，画一个勾就是在骗人。 -->
         <div class="actions" id="permRow" style="margin-top:12px">
           <span class="muted" style="font-size:13px">请求客户机开启：</span>
           <button class="btn-small btn-allow" data-perm-req="keyboard" disabled>键鼠</button>
@@ -170,7 +170,7 @@
 
     <script>
       const ENDPOINT = location.origin;
-      // 本机 GateDesk 本地 API token 取自 URL（start.sh 打开时带入）；读到后存入
+      // GateDesk 本地 API token 取自 URL（运维端打开本页时带入），操作员机与服务机共用同一个值；
       // sessionStorage，刷新保持（同标签页内）。
       const urlToken = new URLSearchParams(location.search).get('token') || '';
       const TOKEN = (urlToken || sessionStorage.getItem('gd_token') || '');
@@ -182,19 +182,34 @@
       let role = 'operator';
       let activeDevice = null;
       let ws = null;
-      let nativeActive = false; // 本机已通过 /connect 发起原生会话且尚未结束
-      let selfId = null; // 运维机自己的 GateDesk ID，设备列表里排除，避免自己和自己聊天
+      let nativeActive = false; // 打开本页的这台机器已通过 /connect 发起原生会话且尚未结束
+      let selfId = null; // 打开本页这台机器的 GateDesk ID，设备列表里排除，避免自己和自己聊天
 
       const $ = (id) => document.getElementById(id);
 
-      async function localJson(path, options) {
-        // 本机 GateDesk 操作走服务端 /api/local 代理（同源），token 随请求带上由服务端校验。
-        const sep = path.includes('?') ? '&' : '?';
-        const res = await fetch(ENDPOINT + '/api/local' + path + sep + 'token=' + encodeURIComponent(TOKEN), {
-          method: (options && options.method) || 'GET',
-          headers: { 'Content-Type': 'application/json' },
-          body: (options && options.body) || undefined,
-        });
+      // 页面上有两个「本机」，它们是不同的机器，必须分开：
+      //
+      // `localJson` 打的是**打开本页的这台机器**的 127.0.0.1:21120。发起远程会话的必须
+      // 是它——会话是本机进程，`--connect` 由谁起，谁才是控制端；`/id`、`/status`、
+      // `/request-permission` 说的也都是「我」。
+      //
+      // `serviceJson` 走服务端 /api/local 代理，落在**运行 server.js 的那台机器**上
+      // （代理里写死了它的回环）。只有 §6.7 那组被控端动作属于它：本机 API 只绑回环，
+      // 服务端够不到客户机，所以运维页批准到的只能是服务机自己的会话。
+      const LOCAL = 'http://127.0.0.1:21120';
+
+      // 直连失败时浏览器只给一句 "Failed to fetch"，看不出是没装 GateDesk 还是这台机器
+      // 没放行本页来源，所以两种可能都写进消息里。
+      function directFailure(e) {
+        const err = new Error(
+          '本机 GateDesk 不可达：' + ((e && e.message) || e) +
+          '（打开本页的这台机器没装/没启动 GateDesk，或它的 api-cors-origin 不含本页来源 ' + ENDPOINT + '）'
+        );
+        err.direct = true;
+        return err;
+      }
+
+      async function readJson(res) {
         let body = null;
         try { body = await res.json(); } catch { }
         if (!res.ok) {
@@ -203,6 +218,32 @@
           throw err;
         }
         return body;
+      }
+
+      async function localJson(path, options) {
+        const sep = path.includes('?') ? '&' : '?';
+        let res;
+        try {
+          res = await fetch(LOCAL + path + sep + 'token=' + encodeURIComponent(TOKEN), {
+            method: (options && options.method) || 'GET',
+            headers: { 'Content-Type': 'application/json' },
+            body: (options && options.body) || undefined,
+          });
+        } catch (e) {
+          throw directFailure(e);
+        }
+        return await readJson(res);
+      }
+
+      // 服务端代理（同源），token 随请求带上由服务端校验；落在服务机上，不走浏览器所在机器。
+      async function serviceJson(path, options) {
+        const sep = path.includes('?') ? '&' : '?';
+        const res = await fetch(ENDPOINT + '/api/local' + path + sep + 'token=' + encodeURIComponent(TOKEN), {
+          method: (options && options.method) || 'GET',
+          headers: { 'Content-Type': 'application/json' },
+          body: (options && options.body) || undefined,
+        });
+        return await readJson(res);
       }
 
       function escapeHtml(s) {
@@ -251,11 +292,12 @@
       }
 
       function renderList(devices) {
-        // 自身设备（本机 GateDesk ID）只有在「本机同时作为客户端在跑 employee」时才列出来，
-        // 否则不显示、也就无法自己和自己聊天。真实客户设备恒显示。
+        // `selfId` 是**操作员机**（本页所在机器）的 GateDesk ID，不是服务机的：操作员机自己
+        // 若也在跑 employee、登记成了客户设备，只有它还 clientOnline 时才列出来，否则自己跟
+        // 自己没法聊。真实客户设备恒显示。
         const others = devices.filter((d) => d.id !== selfId || d.clientOnline === true);
         if (!others.length) {
-          $('deviceList').innerHTML = '<div class="item"><span class="muted">当前无在线客户设备。请客户先打开本机 GateDesk 并运行 start-client.sh。</span></div>';
+          $('deviceList').innerHTML = '<div class="item"><span class="muted">当前无在线客户设备。请客户在自己那台机器上打开 GateDesk 并运行 start-client.sh。</span></div>';
           return;
         }
         $('deviceList').innerHTML = others.map((d) => {
@@ -304,7 +346,7 @@
         s.className = 'status-pill ' + state;
         s.textContent = stateMap[state] || state;
         if (state === 'assisting') {
-          $('ctrlHint').textContent = '请在打开的 GateDesk 原生窗口中完成远程协助；结束请点击「断开本地会话」或「结束协助」。';
+          $('ctrlHint').textContent = '请在操作员机上打开的 GateDesk 原生窗口中完成远程协助；结束请点击「断开本地会话」或「结束协助」。';
         } else if (state === 'requested') {
           $('ctrlHint').textContent = '客户已请求协助，点击「开始协助」进入远程桌面。';
         } else {
@@ -352,7 +394,7 @@
           } else if (data.type === 'control-started') {
             setState('assisting');
           } else if (data.type === 'control-ended' || data.type === 'peer-ended') {
-            // 会话结束（无论谁发起）：先断开本机由 /connect 发起的原生会话，再更新状态。
+            // 会话结束（无论谁发起）：先断开操作员机由 /connect 发起的原生会话，再更新状态。
             tearDownLocal();
             nativeActive = false;
             if (data.type === 'peer-ended' && data.by === 'user') alert('客户已结束协助。');
@@ -411,7 +453,8 @@
         loadDevices();
       }
 
-      // 发起远程控制：请求服务端下发受控端凭据，再触发本机 GateDesk 原生连接。
+      // 发起远程控制：请求服务端下发受控端凭据，再由**打开本页的这台机器**（操作员机）
+      // 的 GateDesk 起 `--connect` —— 会话是本机进程，谁起谁才是控制端。
       async function startControl(deviceId) {
         if (!deviceId) return;
         enterDevice(deviceId);
@@ -424,11 +467,13 @@
           if (!data.ok) throw new Error(data.error || '控制请求失败');
           const q = '/connect?id=' + encodeURIComponent(data.id) +
                     '&password=' + encodeURIComponent(data.password || '');
+          // 由**本页所在的这台机器**发起：它的 GateDesk 起 `--connect`，它才是控制端。
           await localJson(q, { method: 'POST' });
           nativeActive = true;
           setState('assisting');
         } catch (e) {
-          alert('发起远程控制失败：' + e.message);
+          // 两种失败的主体不同：服务端没给凭据，还是操作员机没装 GateDesk、发起不了连接。
+          alert((e.direct ? '本机无法发起远程会话：' : '获取受控端凭据失败：') + e.message);
         }
       }
 
@@ -440,13 +485,13 @@
           await notifyServerEnd(activeDevice.id);
           setState('online');
           loadDevices();
-          alert('已断开本机发起的远程会话，并已通知客户。');
+          alert('已断开操作员机发起的远程会话，并已通知客户。');
         } catch (e) {
           alert('断开失败：' + e.message);
         }
       }
 
-      // 会话结束时的兜底：静默断开本机原生会话，避免对端结束后本地残留。
+      // 会话结束时的兜底：静默断开操作员机的原生会话，避免对端结束后本地残留。
       function tearDownLocal() {
         localJson('/disconnect', { method: 'POST' }).catch(() => {});
       }
@@ -462,7 +507,7 @@
         } catch (e) { /* 服务端不可达时保留本地状态，稍后可手动结束 */ }
       }
 
-      // 周期性探测本机原生会话：若 /connect 发起的原生进程已退出（如控制窗口被直接关闭、
+      // 周期性探测操作员机的原生会话：若 /connect 发起的原生进程已退出（如控制窗口被直接关闭、
       // 连接意外断开）而服务端仍认为 assisting，则代服务端收尾——通知结束并刷新状态。
       async function watchNativeSession() {
         if (!nativeActive || !activeDevice) return;
@@ -476,10 +521,10 @@
       }
 
       // 向对端要四项 A 类权限之一（GateDesk-api.md §6.9 POST /request-permission，
-      // v1.15 起 `keyboard` 也是其中一个名字）。只走本机本地 API：
-      // 本机 GateDesk 的会话进程把请求当 OptionMessage 发给对端，对端会弹自己的确认
+      // v1.15 起 `keyboard` 也是其中一个名字）。只走操作员机的本地 API：
+      // 操作员机的 GateDesk 会话进程把请求当 OptionMessage 发给对端，对端会弹自己的确认
       // 界面，客户不点就什么也不会变。所以这里没有勾选框——
-      // 这是「问」，不是本机的一个状态；勾在谁名下、客户答了什么，只有客户那台机器知道。
+      // 这是「问」，不是操作员机的一个状态；勾在谁名下、客户答了什么，只有客户那台机器知道。
       const PERM_LABELS = { keyboard: '键鼠', clipboard: '剪贴板', audio: '声音', file: '文件传输' };
 
       async function requestPermission(name) {
@@ -500,8 +545,8 @@
       }
 
       // 「打开语音」在运维页就是请客户机把 audio 权限给出来：语音是受控端会话内的开关，
-      // 本机（控制端）读不到也改不了对端的状态，所以走与「请求客户机开启：声音」同一条路，
-      // 不再假装它是本机的一个开关（本机没有会话时 /voice 会直接 409）。
+      // 操作员机（控制端）读不到也改不了对端的状态，所以走与「请求客户机开启：声音」同一条路，
+      // 不再假装它是操作员机的一个开关（操作员机没有会话时 /voice 会直接 409）。
       async function toggleVoice() {
         await requestPermission('audio');
       }
@@ -551,10 +596,10 @@
           const id = await localJson('/id');
           $('selfIdText').textContent = id.id || '-';
           selfId = id.id || null;
-          if (!activeDevice) loadDevices(); // 已知本机 ID 后重列，去掉自己的设备
+          if (!activeDevice) loadDevices(); // 已知操作员机 ID 后重列，去掉自己那台设备
         } catch (e) {
           $('selfIdText').textContent = '-';
-          badge.textContent = '（无法读取本机 GateDesk）';
+          badge.textContent = '（无法读取操作员机 GateDesk：' + e.message + '）';
           return;
         }
         const st = await localJson('/status').catch(() => null);
@@ -565,7 +610,7 @@
         }
       }
 
-      // ── 本机会话与批准：§6.7.2 /approve、§6.7.3 /control（GateDesk-api.md）────
+      // ── 服务机会话与批准：§6.7.2 /approve、§6.7.3 /control（GateDesk-api.md）────
       // 发现变化有两条路（§6.10）：桌面端配了 event-server-url 时会推事件，平台把它经
       // WebSocket 转给本页，页面收到就立刻查一次 /sessions；轮询只是兜底。
       // 页面无从知道对面配没配，所以先按快节奏轮询，**一旦真的收到过一条事件**就说明链路
@@ -636,7 +681,7 @@
             `<span class="meta">ID ${escapeHtml(s.peer_id || '—')}</span>${sessionBadge(s)}</div>`
         );
         if (!s.authorized && !s.disconnected) {
-          out.push('<div class="meta">该对端正在请求接入本机。</div>');
+          out.push('<div class="meta">该对端正在请求接入服务机。</div>');
           out.push(
             '<div class="actions">' +
               actionBtn('approve', s.id, '允许接入', 'btn-allow', true) +
@@ -647,7 +692,7 @@
         if (s.pending_control) {
           const since = pendingSince.get(s.id) || Date.now();
           out.push(
-            '<div class="control-ask">对端请求接管本机键盘鼠标，还有 ' +
+            '<div class="control-ask">对端请求接管服务机键盘鼠标，还有 ' +
               `<span class="countdown" data-deadline="${since + CONTROL_WINDOW_MS}">…</span>，` +
               '超时按拒绝处理。</div>'
           );
@@ -727,16 +772,16 @@
         }
         let data;
         try {
-          data = await localJson('/sessions');
+          data = await serviceJson('/sessions');
         } catch (e) {
           pendingSince.clear();
           if (e.status === 503) {
-            // 503 不是故障：本机没有连接管理器在听（没有会话，或会话面板窗口已退出）。
-            setApprovalState('本机没有会话面板在运行：当前没有对端接入本机，或会话面板已退出。');
+            // 503 不是故障：服务机没有连接管理器在听（没有会话，或会话面板窗口已退出）。
+            setApprovalState('服务机没有会话面板在运行：当前没有对端接入服务机，或会话面板已退出。');
           } else if (e.status === 401) {
             setApprovalState('本地 API 返回 401：token 与服务端 API_TOKEN 不一致。', 'bad');
           } else if (e.status === 502) {
-            setApprovalState('本机 GateDesk 不可达：' + e.message, 'bad');
+            setApprovalState('服务机 GateDesk 不可达：' + e.message, 'bad');
           } else {
             setApprovalState('无法读取会话列表：' + e.message, 'bad');
           }
@@ -773,13 +818,13 @@
       // 控制请求），504 说明连接管理器没在 2 秒内回话。这两种情况重新拉一次 /sessions 就够。
       async function sessionAction(path, body, okText) {
         try {
-          await localJson(path, { method: 'POST', body: JSON.stringify(body) });
+          await serviceJson(path, { method: 'POST', body: JSON.stringify(body) });
           note(okText);
         } catch (e) {
           if (e.status === 409 || e.status === 404 || e.status === 504) {
             note('状态已变化，已刷新', true);
           } else if (e.status === 503) {
-            note('本机没有会话面板在运行，无法代为批准', true);
+            note('服务机没有会话面板在运行，无法代为批准', true);
           } else {
             note('操作失败：' + e.message, true);
           }
@@ -829,7 +874,7 @@
         loadDevices();
         setInterval(() => { if (!activeDevice) loadDevices(); }, 3000);
         setInterval(watchNativeSession, 2000);
-        // 本机会话：事件是快路径（§6.10），轮询是兜底（§8.1 要求间隔远小于 60 秒）。
+        // 服务机会话：事件是快路径（§6.10），轮询是兜底（§8.1 要求间隔远小于 60 秒）。
         startSessionsPolling();
       }
       init();

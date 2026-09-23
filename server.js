@@ -14,10 +14,16 @@ const { WebSocketServer } = require('ws');
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// API token：仅供本服务保留的注入值。页面（employee / admin）从 URL 取本机 token，
-// 直连各机 loopback 127.0.0.1:21120 调用 GateDesk 本地 API；本服务只做设备中心与审计，
-// 不再代发本地 API。API_TOKEN 仅接受启动脚本注入（start.sh 带 token 启动 server），
-// 不从配置文件读取——避免服务端自行去翻 GateDesk 配置文件里的 token。
+// API token：运维端页面（admin）与客户页面（employee）共用同一个值，都从 URL 取。
+// 页面里的本地调用分两类，落在**不同的机器**上，别混：
+//   - 「我这台机器」的动作（/id、/status、/connect、/disconnect、/request-permission）
+//     → 浏览器直连**它所在机器**的 127.0.0.1:21120。发起远程会话必须是这类：会话是本机
+//     进程，`--connect` 由谁起，谁才是控制端。
+//   - §6.7 那组被控端动作（/sessions、/approve、/control、/permission、/terminate、
+//     /dismiss）→ 走本服务的 /api/local 代理（见文件末尾），落在**运行本服务这台机器**上：
+//     本机 API 只绑回环，服务端够不到客户机，所以代理只能批准服务机自己的会话。
+// 本服务自身只做设备中心、审计与这个代理。API_TOKEN 仅接受启动脚本注入（start.sh 带 token
+// 启动 server），不从配置文件读取——避免服务端自行去翻 GateDesk 配置文件里的 token。
 const API_TOKEN = process.env.API_TOKEN || '';
 
 app.use(express.json({ limit: '64kb' }));

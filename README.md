@@ -7,9 +7,12 @@ Web console for GateDesk remote assistance — customer/operator pages, device-c
 Two roles work through two web pages against one Node service (`server.js`, in-memory state):
 
 - **Customer (用户端 / 受控方)** — `public/employee.html` reads the local GateDesk ID and registers it automatically (no manual ID entry), then asks for help with one click.
-- **Operator (运维端 / 控制方)** — `public/admin.html` lists customer devices, starts / force-controls a remote session, and chats.
+- **Operator (运维端 / 控制方)** — `public/admin.html` lists customer devices, starts / force-controls a remote session, and chats. The connect is issued by the machine the page is open on (its own `127.0.0.1:21120`), so open this page on the machine that is to drive the session — which is not necessarily the machine running `server.js`.
 
-Control itself happens in the native GateDesk client, driven through its local HTTP API on `127.0.0.1:21120`.
+Control itself happens in the native GateDesk client, driven through its local HTTP API on `127.0.0.1:21120`. Which machine that loopback belongs to differs per call, and the two must not be mixed up:
+
+- `/connect`, `/disconnect`, `/id`, `/status`, `/request-permission` are issued by the **machine the page is open on** (the operator's own box). A session is a local process: whoever runs `--connect` is the controller.
+- The §6.7 session actions `/sessions`, `/approve`, `/control`, `/permission`, `/terminate`, `/dismiss` act on the **machine running `server.js`**, proxied through `POST /api/local/*`. The local API binds loopback only, so that proxy reaches the service machine's own sessions and nothing else's.
 
 ## Quick start
 
@@ -20,6 +23,8 @@ Control itself happens in the native GateDesk client, driven through its local H
 ```
 
 It ensures an `api-token` in the GateDesk config, launches GateDesk, starts `server.js` (default `PORT=3000`) with `API_TOKEN` set, mints one-time launch tickets, prints both URLs, and opens the operator console. Mode override: `./start.sh employee|admin|both`.
+
+This is the single-machine form: the machine running `server.js` is also the operator's. When the operator sits elsewhere, open `http://<server>:3000/admin?token=<token>` **on the operator's machine** instead, and make sure that machine's GateDesk whitelists the page's origin in `[options] api-cors-origin` — its own `127.0.0.1:21120` is what `/connect` will then be issued to.
 
 **Customer machine** — lightweight launcher:
 
