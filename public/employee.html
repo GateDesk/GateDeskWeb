@@ -484,13 +484,31 @@
       function sessionBadge(s) {
         if (s.disconnected) return '<span class="badge">已结束</span>';
         if (!s.authorized) return '<span class="badge wait">等待接入</span>';
-        if (s.pending_control) return '<span class="badge ctrl">请求控制</span>';
+        if (s.pending_control) {
+          return (
+            '<span class="badge ctrl">' +
+            (s.pending_permission ? '请求权限' : '请求控制') +
+            '</span>'
+          );
+        }
         return '<span class="badge live">协助中</span>';
       }
 
-      function actionBtn(act, id, label, cls, accept) {
+      function actionBtn(act, id, label, cls, accept, perm) {
         const extra = accept === undefined ? '' : ` data-accept="${accept}"`;
-        return `<button class="btn-small ${cls}" data-act="${act}" data-id="${id}"${extra}>${label}</button>`;
+        const permAttr = perm === undefined ? '' : ` data-perm="${perm}"`;
+        return `<button class="btn-small ${cls}" data-act="${act}" data-id="${id}"${extra}${permAttr}>${label}</button>`;
+      }
+
+      // 权限名 → 中文标签（表就是上面那四项）。
+      function permLabel(name) {
+        const found = PERMISSIONS.find((p) => p.name === name);
+        return (found && found.label) || name || '键鼠控制';
+      }
+
+      // 待应答申请的措辞：`pending_permission` 为空是键鼠，其余是 A 类权限名。
+      function pendingLabel(s) {
+        return s.pending_permission ? permLabel(s.pending_permission) : '键鼠控制';
       }
 
       function sessionHtml(s) {
@@ -510,15 +528,19 @@
         }
         if (s.pending_control) {
           const since = pendingSince.get(s.id) || Date.now();
+          // 两种申请共用一列：空是键鼠（交出去就能操作本机），其余三项是本机替客户开一项权限。
+          const label = pendingLabel(s);
           out.push(
-            '<div class="control-ask">对端请求接管本机键盘鼠标，还有 ' +
+            '<div class="control-ask">' +
+              (s.pending_permission ? '对端请求开启「' + label + '」权限' : '对端请求接管本机键盘鼠标') +
+              '，还有 ' +
               `<span class="countdown" data-deadline="${since + CONTROL_WINDOW_MS}">…</span>，` +
               '超时按拒绝处理。</div>'
           );
           out.push(
             '<div class="row">' +
-              actionBtn('control', s.id, '允许控制', 'btn-allow', true) +
-              actionBtn('control', s.id, '拒绝控制', 'btn-deny', false) +
+              actionBtn('control', s.id, '允许' + label, 'btn-allow', true, s.pending_permission || 'keyboard') +
+              actionBtn('control', s.id, '拒绝', 'btn-deny', false, s.pending_permission || 'keyboard') +
               '</div>'
           );
         }
@@ -550,7 +572,7 @@
         return list
           .map((s) =>
             [
-              s.id, s.authorized, s.disconnected, s.pending_control,
+              s.id, s.authorized, s.disconnected, s.pending_control, s.pending_permission,
               s.keyboard, s.clipboard, s.audio, s.file,
               s.name, s.peer_id,
             ].join(',')
@@ -672,8 +694,13 @@
             sessionAction('/approve', { id, accept }, accept ? '已放行接入' : '已拒绝接入');
             break;
           case 'control':
-            // 与桌面端面板一致：允许控制只应答控制请求，不动权限开关（两者是独立闸门）。
-            sessionAction('/control', { id, accept }, accept ? '已允许控制' : '已拒绝控制');
+            // 与桌面端面板一致：应答的是在途的那一项，`name` 必须与之一致（不一致桌面端返回 409）；
+            // 键鼠那一项允许控制，命名权限那一项打开的是本机替客户开的那项权限。
+            sessionAction(
+              '/control',
+              { id, name: el.dataset.perm || 'keyboard', accept },
+              accept ? '已允许' + permLabel(el.dataset.perm) : '已拒绝'
+            );
             break;
           case 'terminate':
             if (confirm('结束该会话？对端会收到通知，之后可以重新连接。')) {
